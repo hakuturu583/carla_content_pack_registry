@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+**/.dev.vars
+*.tfstate
+*.tfstate.*
+.terraform/
+*.tfplan
+coverage/

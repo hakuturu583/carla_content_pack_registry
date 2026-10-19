@@ -1,0 +1,42 @@
+{
+  "name": "carla-content-pack-registry",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CARLA Content Pack Registry (BYOB R2/S3, GitHub OAuth, Cloudflare Workers / AWS Lambda)",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run --project unit",
+    "test:integration": "vitest run --project integration",
+    "dev": "wrangler dev --config deploy/cloudflare/wrangler.local.toml --port 8787",
+    "dev:storage": "docker compose -f local/docker-compose.yml up -d",
+    "dev:seed": "node --experimental-strip-types scripts/seed-local.ts",
+    "db:migrate:local": "wrangler d1 migrations apply registry --local --config deploy/cloudflare/wrangler.local.toml",
+    "build:lambda": "node scripts/build-lambda.mjs",
+    "smoke": "node --experimental-strip-types scripts/smoke.ts"
+  },
+  "dependencies": {
+    "aws4fetch": "1.0.20",
+    "hono": "4.10.4"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-dynamodb": "3.913.0",
+    "@aws-sdk/client-secrets-manager": "3.913.0",
+    "@aws-sdk/lib-dynamodb": "3.913.0",
+    "@cloudflare/workers-types": "4.20251014.0",
+    "@eslint/js": "9.38.0",
+    "@types/aws-lambda": "8.10.152",
+    "@types/node": "22.18.12",
+    "esbuild": "0.25.11",
+    "eslint": "9.38.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.46.2",
+    "vitest": "3.2.4",
+    "wrangler": "4.45.0"
+  }
+}

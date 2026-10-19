@@ -1,0 +1,32 @@
+# Local S3-compatible storage for development (SeaweedFS, Apache-2.0).
+# The image is pinned by tag AND digest; bump both together after re-running the
+# integration tests (npm run test:integration).
+name: ccpr-local
+services:
+  seaweedfs:
+    image: chrislusf/seaweedfs:3.97@sha256:bb05d66d2963b1cc48073190781c3dd29e2c4c88a2ae2986bf58e38c86d89c6e
+    command: >-
+      server -dir=/data -ip.bind=0.0.0.0 -master.volumeSizeLimitMB=64 -volume.max=64
+      -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
+    ports:
+      - "127.0.0.1:8333:8333"
+    volumes:
+      - ./seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro
+      - seaweedfs-data:/data
+    healthcheck:
+      # The S3 gateway answers 403 to anonymous requests once it is up.
+      test: ["CMD-SHELL", "wget -S --spider http://127.0.0.1:8333/ 2>&1 | grep -q 'HTTP/'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Only used by integration tests of the AWS (DynamoDB) repository.
+  dynamodb:
+    image: amazon/dynamodb-local:2.5.4
+    command: ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    profiles: ["aws"]
+
+volumes:
+  seaweedfs-data:
