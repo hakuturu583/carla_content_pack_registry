@@ -8,3 +8,4 @@ dist/
 .terraform/
 *.tfplan
 coverage/
+deploy/cloudflare/*.generated.toml

@@ -107,7 +107,7 @@ defineApiScenarios('AWS Lambda handler (API Gateway REST) + DynamoDB Local + Sea
           identity: { sourceIp: '127.0.0.1' },
         },
       } as unknown as APIGatewayProxyEvent;
-      const r = (await handler(event, {} as Context)) as APIGatewayProxyResult & { multiValueHeaders?: Record<string, string[]> };
+      const r = (await handler(event as never, {} as Context)) as APIGatewayProxyResult & { multiValueHeaders?: Record<string, string[]> };
       const h = new Headers();
       for (const [k, v] of Object.entries(r.headers ?? {})) h.set(k, String(v));
       for (const [k, vs] of Object.entries(r.multiValueHeaders ?? {})) for (const v of vs) h.append(k, String(v));

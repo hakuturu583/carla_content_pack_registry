@@ -1,0 +1,105 @@
+# AWS Lambda + API Gateway + DynamoDB deployment.
+# GitHub Environments "staging"/"production" (+ "<env>-plan" without approval):
+#   vars:    AWS_DEPLOY_ROLE_ARN, AWS_REGION
+#   secrets: SMOKE_GITHUB_TOKEN (optional)
+# The Secrets Manager value is written once per docs/runbook.md, not by this workflow.
+name: Deploy (AWS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options: [staging, production]
+        default: staging
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-aws-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build:lambda
+      - run: cd dist/lambda && zip -q -r ../lambda.zip index.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lambda-zip
+          path: dist/lambda.zip
+          retention-days: 7
+
+  plan:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment }}-plan
+    defaults:
+      run:
+        working-directory: infra/aws
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: lambda-zip
+          path: dist
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.13.4
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - run: terraform init -input=false -backend-config=envs/${{ inputs.environment }}.backend.hcl
+      - run: terraform plan -input=false -var-file=envs/${{ inputs.environment }}.tfvars -out=tfplan
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aws-tfplan-${{ inputs.environment }}
+          path: infra/aws/tfplan
+          retention-days: 3
+
+  release:
+    # One approval covers terraform apply (incl. the new Lambda code) and the smoke test.
+    needs: plan
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment }}
+    defaults:
+      run:
+        working-directory: infra/aws
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: lambda-zip
+          path: dist
+      - uses: actions/download-artifact@v5
+        with:
+          name: aws-tfplan-${{ inputs.environment }}
+          path: infra/aws
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.13.4
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - run: terraform init -input=false -backend-config=envs/${{ inputs.environment }}.backend.hcl
+      - run: terraform apply -input=false tfplan
+      - name: Smoke test
+        env:
+          SMOKE_TOKEN: ${{ secrets.SMOKE_GITHUB_TOKEN }}
+        run: SMOKE_BASE_URL="$(terraform output -raw api_base_url)" node --experimental-strip-types ../../scripts/smoke.ts

@@ -1,9 +1,12 @@
 // Minimal browser UI for manual testing (login, list buckets/objects, download).
+// All URLs are relative to <base href> so the page also works under a path prefix.
 // Bucket registration and ACL management are done through the API / CLI.
-export const INDEX_HTML = `<!doctype html>
+/** `basePath` is the path prefix of PUBLIC_BASE_URL (e.g. an API Gateway stage), or ''. */
+export const indexHtml = (basePath: string) => `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<base href="${basePath.replace(/[^A-Za-z0-9/_-]/g, '')}/">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CARLA Content Pack Registry</title>
 <style>
@@ -22,7 +25,7 @@ export const INDEX_HTML = `<!doctype html>
 <p id="err"></p>
 <section id="buckets"></section>
 <section id="objects"></section>
-<script src="/app.js"></script>
+<script src="app.js"></script>
 </body>
 </html>`;
 
@@ -41,19 +44,19 @@ async function api(path, opts = {}) {
 }
 async function loadMe() {
   try {
-    const me = await api('/v1/me');
+    const me = await api('v1/me');
     csrf = me.csrfToken;
     $('who').innerHTML = 'Signed in as <b>' + esc(me.user.login) + '</b> <button id="logout">Sign out</button>';
-    $('logout').onclick = async () => { await api('/logout', { method: 'POST' }); location.reload(); };
+    $('logout').onclick = async () => { await api('logout', { method: 'POST' }); location.reload(); };
     if (me.membershipError) $('err').textContent = 'GitHub membership check failed: ' + me.membershipError;
     return true;
   } catch (e) {
-    $('who').innerHTML = '<a class="btn" href="/login/github">Sign in with GitHub</a>';
+    $('who').innerHTML = '<a class="btn" href="login/github">Sign in with GitHub</a>';
     return false;
   }
 }
 async function loadBuckets() {
-  const { buckets } = await api('/v1/buckets');
+  const { buckets } = await api('v1/buckets');
   const rows = buckets.map((b) =>
     '<tr><td><a href="#" data-id="' + esc(b.id) + '">' + esc(b.name) + '</a></td><td>' + esc(b.owner.login) +
     '</td><td><span class="tag">' + esc(b.visibility) + '</span></td><td>' + esc(b.provider) + '</td><td>' + esc(b.verifyStatus) + '</td></tr>').join('');
@@ -63,13 +66,13 @@ async function loadBuckets() {
 async function loadObjects(id, name) {
   $('err').textContent = '';
   try {
-    const page = await api('/v1/buckets/' + id + '/objects?limit=200');
+    const page = await api('v1/buckets/' + id + '/objects?limit=200');
     const rows = page.objects.map((o) =>
       '<tr><td><code>' + esc(o.key) + '</code></td><td>' + o.size + '</td><td><button data-key="' + esc(o.key) + '">Download</button></td></tr>').join('');
     $('objects').innerHTML = '<h2>' + esc(name) + '</h2><table><tr><th>Key</th><th>Size</th><th></th></tr>' + rows + '</table>';
     for (const b of $('objects').querySelectorAll('button[data-key]')) b.onclick = async () => {
       try {
-        const u = await api('/v1/buckets/' + id + '/objects/' + encodeURIComponent(b.dataset.key) + '/download');
+        const u = await api('v1/buckets/' + id + '/objects/' + b.dataset.key.split('/').map(encodeURIComponent).join('/') + '/download');
         location.href = u.url;
       } catch (e) { $('err').textContent = e.message; }
     };

@@ -9,7 +9,7 @@ import type { Session } from '../core/types.ts';
 import { MOCK_USERS } from '../identity/mock.ts';
 import type { Services } from '../runtime/services.ts';
 import { log } from '../util/log.ts';
-import { APP_JS, INDEX_HTML } from './ui.ts';
+import { APP_JS, indexHtml } from './ui.ts';
 
 type Env = {
   Variables: {
@@ -33,6 +33,11 @@ async function jsonBody(c: Context): Promise<unknown> {
   } catch {
     throw badRequest('Invalid JSON body');
   }
+}
+
+/** Path prefix of PUBLIC_BASE_URL (e.g. "/staging" for an API Gateway stage URL), or "". */
+function basePath(s: Services): string {
+  return new URL(s.config.publicBaseUrl).pathname.replace(/\/+$/, '');
 }
 
 function bucketId(c: Context): string {
@@ -91,16 +96,16 @@ export function createApp(getServices: ServicesProvider): Hono<Env> {
   app.get('/', (c) => {
     c.header(
       'content-security-policy',
-      "default-src 'none'; script-src 'self'; connect-src 'self'; img-src 'self' https://avatars.githubusercontent.com; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+      "default-src 'none'; script-src 'self'; connect-src 'self'; img-src 'self' https://avatars.githubusercontent.com; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
     );
-    return c.html(INDEX_HTML);
+    return c.html(indexHtml(basePath(c.get('services'))));
   });
   app.get('/app.js', (c) => c.body(APP_JS, 200, { 'content-type': 'text/javascript; charset=utf-8' }));
 
   app.get('/login/github', async (c) => {
     const s = c.get('services');
     if (s.config.authMode === 'mock') {
-      const links = MOCK_USERS.map((u) => `<li><a href="/login/mock?user=${u.login}">${u.login}</a></li>`).join('');
+      const links = MOCK_USERS.map((u) => `<li><a href="${basePath(s)}/login/mock?user=${u.login}">${u.login}</a></li>`).join('');
       return c.html(`<!doctype html><title>Mock login</title><p>Development mock login (ENVIRONMENT=local only):</p><ul>${links}</ul>`);
     }
     const { location, cookie } = await s.auth.startLogin(c.req.query('redirect_to'));
@@ -115,7 +120,7 @@ export function createApp(getServices: ServicesProvider): Hono<Env> {
       getCookie(c, s.auth.stateCookie),
     );
     for (const ck of r.cookies) c.header('set-cookie', ck, { append: true });
-    return c.redirect(r.redirect, 302);
+    return c.redirect(`${basePath(s)}${r.redirect}`, 302);
   });
 
   app.get('/login/mock', async (c) => {
@@ -124,7 +129,7 @@ export function createApp(getServices: ServicesProvider): Hono<Env> {
     if (s.config.authMode !== 'mock' || s.config.environment !== 'local') throw new RegistryError('not_found', 'Not found');
     const login = c.req.query('user') ?? '';
     c.header('set-cookie', await s.auth.createSession(`mock:${login}`));
-    return c.redirect('/', 302);
+    return c.redirect(`${basePath(s)}/`, 302);
   });
 
   // ---------------------------------------------------------------------------

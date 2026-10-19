@@ -5,6 +5,7 @@
 //
 // SMOKE_LOCAL_FLOW=1 registers a SeaweedFS bucket with alice's local keys, verifies it,
 // and downloads through a presigned URL (local only). Otherwise the script is read-only.
+export {};
 const base = (process.env.SMOKE_BASE_URL ?? 'http://localhost:8787').replace(/\/+$/, '');
 const token = process.env.SMOKE_TOKEN;
 const bucketId = process.env.SMOKE_BUCKET_ID;

@@ -1,0 +1,498 @@
+openapi: 3.1.0
+info:
+  title: CARLA Content Pack Registry API
+  version: 0.1.0
+  description: |
+    Discovery, sharing and download of CARLA Content Packs stored in user-owned
+    (BYOB) Cloudflare R2 or AWS S3 buckets. The same contract is served by the
+    Cloudflare Workers and the AWS Lambda deployments.
+
+    **Authentication.** Browsers use the GitHub OAuth web flow (`/login/github`) and
+    a session cookie. State-changing requests with a cookie session must send the
+    `X-CSRF-Token` header (value from `GET /v1/me`) and, when the browser sends one,
+    a same-origin `Origin`. CLIs send `Authorization: Bearer <GitHub OAuth token>`
+    (e.g. obtained with the OAuth device flow for this OAuth App, scope `read:org`);
+    bearer requests are not subject to CSRF checks.
+
+    **Authorization.** Bucket owners can always read and manage their buckets.
+    Public buckets are readable by any signed-in GitHub user. Private buckets are
+    readable only when an ACL entry (GitHub user, organization or team, matched by
+    numeric ID) applies. If GitHub cannot confirm org/team membership, access is
+    denied. Private buckets the caller cannot read are reported as `404`.
+
+    **Downloads.** The registry never proxies object data. `.../download` returns a
+    presigned GET URL valid for at most 300 seconds. A presigned URL can be reused
+    by anyone who holds it until it expires; treat it as a secret.
+  license:
+    name: UNLICENSED
+servers:
+  - url: http://localhost:8787
+    description: Local (wrangler dev)
+tags:
+  - name: system
+    description: Health
+  - name: auth
+    description: GitHub OAuth login and sessions
+  - name: buckets
+    description: BYOB bucket registration (owner-managed)
+  - name: acl
+    description: Read access lists (GitHub user / org / team)
+  - name: objects
+    description: Object listing and presigned downloads
+
+components:
+  securitySchemes:
+    session:
+      type: apiKey
+      in: cookie
+      name: __Host-ccpr_session
+      description: Session cookie (`ccpr_session` on http://localhost).
+    bearer:
+      type: http
+      scheme: bearer
+      description: GitHub OAuth access token with `read:org`.
+  parameters:
+    BucketId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    CsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: false
+      description: Required for cookie-authenticated POST/PUT/PATCH/DELETE.
+      schema: { type: string }
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                [bad_request, unauthenticated, forbidden, not_found, conflict, rate_limited, csrf_failed,
+                 membership_unverifiable, storage_error, not_verified, misconfigured, upstream_unavailable, internal]
+            message: { type: string }
+            details: { type: object, additionalProperties: true }
+    User:
+      type: object
+      required: [id, login]
+      properties:
+        id: { type: integer, description: GitHub numeric user id }
+        login: { type: string }
+        name: { type: [string, 'null'] }
+        avatarUrl: { type: [string, 'null'] }
+    Me:
+      type: object
+      required: [user, authMode, csrfToken]
+      properties:
+        user: { $ref: '#/components/schemas/User' }
+        authMode: { type: string, enum: [github, mock] }
+        csrfToken: { type: [string, 'null'], description: null for bearer authentication }
+        memberships:
+          type: [object, 'null']
+          properties:
+            orgIds: { type: array, items: { type: integer } }
+            teamIds: { type: array, items: { type: integer } }
+        membershipError:
+          type: [string, 'null']
+          description: Set when GitHub could not confirm memberships (e.g. org has not approved the OAuth App).
+    StorageInput:
+      oneOf:
+        - type: object
+          title: Cloudflare R2
+          required: [provider, accountId, bucket]
+          properties:
+            provider: { const: r2 }
+            accountId: { type: string, pattern: '^[0-9a-f]{32}$' }
+            bucket: { type: string, pattern: '^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$' }
+        - type: object
+          title: AWS S3 (cross-account role)
+          required: [provider, region, bucket, roleArn]
+          properties:
+            provider: { const: s3 }
+            region: { type: string, examples: [us-east-1, ap-northeast-1] }
+            bucket: { type: string, pattern: '^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$', description: Dots are not allowed. }
+            roleArn: { type: string, pattern: '^arn:aws:iam::\d{12}:role/.+$' }
+        - type: object
+          title: Local SeaweedFS (ENVIRONMENT=local only)
+          required: [provider, bucket]
+          properties:
+            provider: { const: local }
+            bucket: { type: string }
+    StaticCredentials:
+      type: object
+      description: Bucket-scoped S3 API token (R2 / local). Write-only; never returned.
+      required: [accessKeyId, secretAccessKey]
+      properties:
+        accessKeyId: { type: string }
+        secretAccessKey: { type: string, writeOnly: true }
+    BucketCreate:
+      type: object
+      required: [name, storage]
+      properties:
+        name: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' }
+        description: { type: string, maxLength: 1000 }
+        visibility: { type: string, enum: [public, private], default: private }
+        storage: { $ref: '#/components/schemas/StorageInput' }
+        credentials:
+          $ref: '#/components/schemas/StaticCredentials'
+          description: Required for r2/local, forbidden for s3.
+    BucketPatch:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string }
+        description: { type: string }
+        visibility: { type: string, enum: [public, private] }
+    Bucket:
+      type: object
+      required: [id, owner, name, description, visibility, provider, verifyStatus, verifiedAt, createdAt, updatedAt, permissions]
+      properties:
+        id: { type: string, format: uuid }
+        owner:
+          type: object
+          properties:
+            id: { type: integer }
+            login: { type: [string, 'null'] }
+        name: { type: string }
+        description: { type: string }
+        visibility: { type: string, enum: [public, private] }
+        provider: { type: string, enum: [r2, s3, local] }
+        verifyStatus: { type: string, enum: [unverified, verified, failed] }
+        verifiedAt: { type: [string, 'null'], format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        permissions:
+          type: object
+          properties:
+            read: { const: true }
+            manage: { type: boolean }
+        storage:
+          type: object
+          description: Owner only. Never contains secrets.
+          additionalProperties: { type: string }
+        hasCredentials: { type: boolean, description: Owner only. }
+        verifyDetail: { type: [string, 'null'], description: Owner only. }
+        awsTrust:
+          type: object
+          description: Owner only, S3 buckets. Use these values in the IAM role trust policy.
+          properties:
+            principalArn: { type: [string, 'null'] }
+            externalId: { type: string }
+    AclEntryInput:
+      oneOf:
+        - type: object
+          required: [type, login]
+          properties:
+            type: { const: user }
+            login: { type: string }
+        - type: object
+          required: [type, login]
+          properties:
+            type: { const: org }
+            login: { type: string }
+        - type: object
+          required: [type, org, slug]
+          properties:
+            type: { const: team }
+            org: { type: string }
+            slug: { type: string }
+    AclEntry:
+      type: object
+      required: [type, id, name]
+      properties:
+        type: { type: string, enum: [user, org, team] }
+        id: { type: integer, description: GitHub numeric id }
+        name: { type: string, description: 'Display name when written: login, org, or org/slug' }
+    VerifyReport:
+      type: object
+      required: [ok, checks, warnings]
+      properties:
+        ok: { type: boolean }
+        checks:
+          type: array
+          items:
+            type: object
+            required: [name, ok]
+            properties:
+              name: { type: string, examples: [credentials, list_objects, head_object, anonymous_list_denied, anonymous_read_denied] }
+              ok: { type: boolean }
+              detail: { type: string }
+        warnings: { type: array, items: { type: string } }
+    ObjectPage:
+      type: object
+      required: [objects, prefixes, nextCursor]
+      properties:
+        objects:
+          type: array
+          items:
+            type: object
+            required: [key, size, etag, lastModified]
+            properties:
+              key: { type: string }
+              size: { type: integer }
+              etag: { type: string }
+              lastModified: { type: string }
+        prefixes: { type: array, items: { type: string } }
+        nextCursor: { type: [string, 'null'] }
+    PresignedUrl:
+      type: object
+      required: [url, method, expiresAt]
+      properties:
+        url: { type: string, format: uri }
+        method: { const: GET }
+        expiresAt: { type: string, format: date-time }
+
+security:
+  - session: []
+  - bearer: []
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      tags: [system]
+      security: []
+      summary: Liveness check
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { const: ok }
+                  runtime: { type: string, enum: [cloudflare, aws] }
+                  environment: { type: string, enum: [local, staging, production] }
+                  authMode: { type: string, enum: [github, mock] }
+  /login/github:
+    get:
+      operationId: startGithubLogin
+      tags: [auth]
+      security: []
+      summary: Start GitHub OAuth (state + PKCE)
+      parameters:
+        - { name: redirect_to, in: query, schema: { type: string }, description: Same-site relative path to return to }
+      responses:
+        '302': { description: Redirect to github.com (sets a short-lived state cookie) }
+  /login/github/callback:
+    get:
+      operationId: githubCallback
+      tags: [auth]
+      security: []
+      summary: GitHub OAuth callback
+      parameters:
+        - { name: code, in: query, schema: { type: string } }
+        - { name: state, in: query, schema: { type: string } }
+      responses:
+        '302': { description: Session cookie set; redirect to the stored relative path }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /logout:
+    post:
+      operationId: logout
+      summary: End the session
+      tags: [auth]
+      parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
+      responses:
+        '204': { description: Session removed }
+        '403': { $ref: '#/components/responses/Error' }
+  /v1/me:
+    get:
+      operationId: getMe
+      summary: Current user, memberships and CSRF token
+      tags: [auth]
+      responses:
+        '200': { description: Current user, content: { application/json: { schema: { $ref: '#/components/schemas/Me' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+  /v1/buckets:
+    get:
+      operationId: listBuckets
+      tags: [buckets]
+      summary: Buckets readable by the caller
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  buckets: { type: array, items: { $ref: '#/components/schemas/Bucket' } }
+    post:
+      operationId: createBucket
+      tags: [buckets]
+      summary: Register a bucket (caller becomes the owner)
+      parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/BucketCreate' } } }
+      responses:
+        '201': { description: Created (verifyStatus=unverified), content: { application/json: { schema: { $ref: '#/components/schemas/Bucket' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /v1/buckets/{id}:
+    parameters: [{ $ref: '#/components/parameters/BucketId' }]
+    get:
+      operationId: getBucket
+      summary: Get a readable bucket
+      tags: [buckets]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Bucket' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      operationId: updateBucket
+      tags: [buckets]
+      summary: Update name/description/visibility (owner only)
+      description: Changing visibility from public to private resets verification.
+      parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/BucketPatch' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Bucket' } } } }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    delete:
+      operationId: deleteBucket
+      tags: [buckets]
+      summary: Deregister (owner only). Objects in storage are NOT deleted.
+      parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
+      responses:
+        '204': { description: Metadata and ACL removed }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /v1/buckets/{id}/acl:
+    parameters: [{ $ref: '#/components/parameters/BucketId' }]
+    get:
+      operationId: getBucketAcl
+      tags: [acl]
+      summary: Read ACL (owner only)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { entries: { type: array, items: { $ref: '#/components/schemas/AclEntry' } } } }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    put:
+      operationId: putBucketAcl
+      tags: [acl]
+      summary: Replace ACL (owner only)
+      description: Names are resolved to GitHub numeric IDs with the owner's token. At most 100 entries.
+      parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [entries], properties: { entries: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/AclEntryInput' } } } }
+      responses:
+        '200':
+          description: Stored ACL
+          content:
+            application/json:
+              schema: { type: object, properties: { entries: { type: array, items: { $ref: '#/components/schemas/AclEntry' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /v1/buckets/{id}/verify:
+    parameters: [{ $ref: '#/components/parameters/BucketId' }]
+    post:
+      operationId: verifyBucket
+      tags: [buckets]
+      summary: Verify storage access (owner only)
+      description: |
+        Checks that the registry can list/head objects, and for private buckets that anonymous
+        listing/reads are rejected. Object listing and downloads require verifyStatus=verified.
+      parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
+      responses:
+        '200':
+          description: Verification result (also when verification failed)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  bucket: { $ref: '#/components/schemas/Bucket' }
+                  report: { $ref: '#/components/schemas/VerifyReport' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /v1/buckets/{id}/credentials:
+    parameters: [{ $ref: '#/components/parameters/BucketId' }]
+    put:
+      operationId: putBucketCredentials
+      tags: [buckets]
+      summary: Replace storage credentials (owner only); resets verification
+      parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/StaticCredentials'
+                - type: object
+                  title: S3 role
+                  required: [roleArn]
+                  properties:
+                    roleArn: { type: string }
+                    rotateExternalId: { type: boolean }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Bucket' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /v1/buckets/{id}/objects:
+    parameters: [{ $ref: '#/components/parameters/BucketId' }]
+    get:
+      operationId: listObjects
+      summary: List objects (prefix, delimiter, pagination)
+      tags: [objects]
+      parameters:
+        - { name: prefix, in: query, schema: { type: string } }
+        - { name: delimiter, in: query, schema: { const: / } }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 100 } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ObjectPage' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/Error' }
+  /v1/buckets/{id}/objects/{key}/download:
+    parameters:
+      - { $ref: '#/components/parameters/BucketId' }
+      - name: key
+        in: path
+        required: true
+        description: |
+          Object key. Percent-encode each path segment and keep `/` separators
+          (`maps/Town 10.tar` -> `maps/Town%2010.tar`); a fully encoded key
+          (`maps%2FTown%2010.tar`) is also accepted.
+        schema: { type: string }
+    get:
+      operationId: downloadObject
+      tags: [objects]
+      summary: Presigned download URL (<= 300 s)
+      parameters:
+        - { name: redirect, in: query, schema: { const: '1' }, description: Respond with 302 to the URL instead of JSON }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PresignedUrl' } } } }
+        '302': { description: Redirect to the presigned URL }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }

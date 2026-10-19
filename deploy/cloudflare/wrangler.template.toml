@@ -1,0 +1,40 @@
+# Rendered per environment by scripts/render-wrangler.mjs (values come from
+# Terraform outputs and GitHub Environment variables). Do not deploy this file directly.
+# Secrets are set with `wrangler secret put --env <env>`:
+#   GITHUB_CLIENT_SECRET, CREDENTIAL_KEYS
+#   REGISTRY_AWS_ACCESS_KEY_ID, REGISTRY_AWS_SECRET_ACCESS_KEY (only if S3 buckets are supported)
+name = "ccpr-registry-${ENV}"
+main = "../../src/runtime/cloudflare.ts"
+compatibility_date = "2025-10-01"
+workers_dev = false
+routes = [{ pattern = "${HOSTNAME}/*", zone_name = "${ZONE_NAME}" }]
+
+[observability]
+enabled = true
+
+[triggers]
+crons = ["17 3 * * *"]   # daily purge of expired sessions / cache / old audit rows
+
+[vars]
+ENVIRONMENT = "${ENV}"
+AUTH_MODE = "github"
+PUBLIC_BASE_URL = "https://${HOSTNAME}"
+GITHUB_CLIENT_ID = "${GITHUB_CLIENT_ID}"
+REGISTRY_AWS_PRINCIPAL_ARN = "${REGISTRY_AWS_PRINCIPAL_ARN}"
+AWS_STS_REGION = "${AWS_STS_REGION}"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "${D1_DATABASE_NAME}"
+database_id = "${D1_DATABASE_ID}"
+migrations_dir = "../../migrations"
+
+[[ratelimits]]
+name = "RL_WRITE"
+namespace_id = "${RL_WRITE_NAMESPACE}"
+simple = { limit = 30, period = 60 }
+
+[[ratelimits]]
+name = "RL_READ"
+namespace_id = "${RL_READ_NAMESPACE}"
+simple = { limit = 120, period = 60 }

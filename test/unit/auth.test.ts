@@ -69,6 +69,13 @@ describe('cookie session + CSRF (mock login)', () => {
     expect((await app.request('http://localhost:8787/v1/me', { headers: { cookie } })).status).toBe(401);
   });
 
+  it('keeps redirects under a PUBLIC_BASE_URL path prefix (API Gateway stage URLs)', async () => {
+    const { app } = inProcess(new MemoryRepository(), testEnv({ PUBLIC_BASE_URL: 'http://localhost:8787/staging' }));
+    const r = await app.request('http://localhost:8787/login/mock?user=alice');
+    expect(r.headers.get('location')).toBe('/staging/');
+    expect(await (await app.request('http://localhost:8787/')).text()).toContain('<base href="/staging/">');
+  });
+
   it('stores the GitHub token encrypted, never in plaintext', async () => {
     const repo = new MemoryRepository();
     const { app } = inProcess(repo);
