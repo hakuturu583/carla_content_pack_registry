@@ -2,7 +2,8 @@
 //!
 //! Stored as JSON in `$CARLA_PACK_CONFIG_DIR/credentials.json` (default: the OS config
 //! directory, e.g. `~/.config/carla-pack/`), readable only by the user on Unix.
-//! Environment overrides: `CARLA_PACK_REGISTRY`, `CARLA_PACK_TOKEN`.
+//! Environment: `CARLA_PACK_REGISTRY`, `CARLA_PACK_TOKEN` (override the saved values),
+//! `CARLA_PACK_CONFIG_DIR`; `CARLA_PACK_GITHUB_URL` is read by auth.rs.
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;

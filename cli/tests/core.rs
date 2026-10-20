@@ -1,9 +1,11 @@
 //! Core behaviour against mock HTTP servers (registry, storage and GitHub).
-use carla_pack::auth::{DeviceFlow, Poll};
+use carla_pack::auth::{DeviceCode, DeviceFlow, Poll};
+use carla_pack::client::{AclChange, AclRef, PullEvent};
 use carla_pack::store::{Login, Store};
 use carla_pack::{Client, Error};
 use httpmock::prelude::*;
 use serde_json::json;
+use std::sync::Mutex;
 
 const BUCKET_ID: &str = "5d93316f-ced0-4419-836f-813b9d450715";
 
@@ -50,9 +52,9 @@ fn resolves_owner_name_references() {
         ]}));
     });
     let c = Client::new(&server.base_url(), Some("t".into())).unwrap();
-    assert_eq!(c.resolve_bucket("alice/maps").unwrap().id, BUCKET_ID);
-    assert_eq!(c.resolve_bucket("ALICE/maps").unwrap().id, BUCKET_ID);
-    assert_eq!(c.resolve_bucket("props").unwrap().name, "props");
+    assert_eq!(c.resolve_bucket("alice/maps").unwrap()["id"], BUCKET_ID);
+    assert_eq!(c.resolve_bucket("ALICE/maps").unwrap()["id"], BUCKET_ID);
+    assert_eq!(c.resolve_bucket("props").unwrap()["name"], "props");
     let ambiguous = c.resolve_bucket("maps").unwrap_err().to_string();
     assert!(ambiguous.contains("alice/maps") && ambiguous.contains("bob/maps"), "{ambiguous}");
     assert!(matches!(c.resolve_bucket("carol/maps"), Err(Error::Usage(_))));
@@ -75,7 +77,7 @@ fn follows_object_pagination() {
                                             "prefixes": [], "nextCursor": null }));
     });
     let c = Client::new(&server.base_url(), Some("t".into())).unwrap();
-    let keys: Vec<_> = c.list_all_objects(BUCKET_ID, Some("maps/")).unwrap().into_iter().map(|o| o.key).collect();
+    let keys: Vec<_> = c.list_objects(BUCKET_ID, Some("maps/")).unwrap().into_iter().map(|o| o.key).collect();
     assert_eq!(keys, ["maps/a", "maps/b"]);
 }
 
@@ -203,4 +205,106 @@ fn store_round_trip_and_permissions() {
         let mode = std::fs::metadata(dir.path().join("credentials.json")).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
     }
+}
+
+#[test]
+fn device_flow_wait_handles_slow_down_and_interrupts() {
+    let github = MockServer::start();
+    let mut slow = github.mock(|when, then| {
+        when.method(POST).path("/login/oauth/access_token");
+        then.status(200).json_body(json!({ "error": "slow_down", "interval": 0 }));
+    });
+    let flow = DeviceFlow::new(&github.base_url(), "cid").unwrap();
+    let code = DeviceCode {
+        device_code: "dc".into(),
+        user_code: "U".into(),
+        verification_uri: "v".into(),
+        expires_in: 60,
+        interval: 0,
+    };
+    // keep_going returning false aborts before the next poll.
+    let mut ticks = 0;
+    assert!(matches!(
+        flow.wait(&code, || {
+            ticks += 1;
+            ticks < 3
+        }),
+        Err(Error::Interrupted)
+    ));
+    assert_eq!(slow.calls(), 2);
+    slow.delete();
+    github.mock(|when, then| {
+        when.method(POST).path("/login/oauth/access_token");
+        then.status(200).json_body(json!({ "access_token": "gho_x" }));
+    });
+    assert_eq!(flow.wait(&code, || true).unwrap(), "gho_x");
+}
+
+#[test]
+fn acl_add_and_remove_merge_with_the_stored_entries() {
+    let server = MockServer::start();
+    let acl = format!("/v1/buckets/{BUCKET_ID}/acl");
+    server.mock(|when, then| {
+        when.method(GET).path(&acl);
+        then.status(200).json_body(json!({ "entries": [
+            { "type": "org", "id": 1, "name": "carla-sim" },
+            { "type": "team", "id": 2, "name": "carla-sim/maps" },
+        ]}));
+    });
+    let added = server.mock(|when, then| {
+        when.method(PUT).path(&acl).json_body(json!({ "entries": [
+            { "type": "org", "login": "carla-sim" },
+            { "type": "team", "org": "carla-sim", "slug": "maps" },
+            { "type": "user", "login": "bob" },
+        ]}));
+        then.status(200).json_body(json!({ "entries": [] }));
+    });
+    let removed = server.mock(|when, then| {
+        when.method(PUT).path(&acl).json_body(json!({ "entries": [{ "type": "org", "login": "carla-sim" }] }));
+        then.status(200).json_body(json!({ "entries": [] }));
+    });
+    let c = Client::new(&server.base_url(), Some("t".into())).unwrap();
+    c.update_acl(BUCKET_ID, AclChange::Add, vec![AclRef::parse("user", "bob").unwrap()]).unwrap();
+    c.update_acl(BUCKET_ID, AclChange::Remove, vec![AclRef::parse("team", "Carla-Sim/MAPS").unwrap()]).unwrap();
+    assert!(c.update_acl(BUCKET_ID, AclChange::Add, vec![]).is_err());
+    added.assert();
+    removed.assert();
+}
+
+#[test]
+fn pull_expands_prefixes_skips_existing_and_refuses_escaping_keys() {
+    let registry = MockServer::start();
+    let storage = MockServer::start();
+    registry.mock(|when, then| {
+        when.method(GET).path(format!("/v1/buckets/{BUCKET_ID}/objects")).query_param("prefix", "maps/");
+        then.status(200).json_body(json!({ "objects": [
+            { "key": "maps/a.tar", "size": 1 }, { "key": "maps/b.tar", "size": 1 }], "nextCursor": null }));
+    });
+    for key in ["maps/a.tar", "maps/b.tar", "props/c.tar"] {
+        registry.mock(|when, then| {
+            when.method(GET).path(format!("/v1/buckets/{BUCKET_ID}/objects/{key}/download"));
+            then.status(200).json_body(json!({ "url": storage.url(format!("/{key}")) }));
+        });
+        storage.mock(|when, then| {
+            when.method(GET).path(format!("/{key}"));
+            then.status(200).body(key);
+        });
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("maps")).unwrap();
+    std::fs::write(dir.path().join("maps/b.tar"), "old").unwrap();
+
+    let c = Client::new(&registry.base_url(), Some("t".into())).unwrap();
+    let events = Mutex::new(Vec::new());
+    let targets = vec!["maps/".to_string(), "props/c.tar".to_string()];
+    let total = c.pull(BUCKET_ID, &targets, dir.path(), false, 3, |e| events.lock().unwrap().push(e)).unwrap();
+    assert_eq!(total, ("maps/a.tar".len() + "props/c.tar".len()) as u64);
+    assert_eq!(std::fs::read_to_string(dir.path().join("props/c.tar")).unwrap(), "props/c.tar");
+    assert_eq!(std::fs::read_to_string(dir.path().join("maps/b.tar")).unwrap(), "old");
+    let events = events.into_inner().unwrap();
+    assert_eq!(events.iter().filter(|e| matches!(e, PullEvent::Skipped { .. })).count(), 1);
+    assert_eq!(events.iter().filter(|e| matches!(e, PullEvent::Downloaded { .. })).count(), 2);
+
+    let escape = c.pull(BUCKET_ID, &["../etc/passwd".to_string()], dir.path(), true, 1, |_| {});
+    assert!(matches!(escape, Err(Error::Usage(m)) if m.contains("outside")));
 }

@@ -4,6 +4,6 @@ The networking, login, credential storage and download logic is implemented in R
 (``carla_pack._core``); this package provides the ``carla-pack`` command line interface.
 """
 
-from ._core import CarlaPackError, Client, DeviceFlow, __version__
+from ._core import CarlaPackError, Client, __version__
 
-__all__ = ["CarlaPackError", "Client", "DeviceFlow", "__version__"]
+__all__ = ["CarlaPackError", "Client", "__version__"]

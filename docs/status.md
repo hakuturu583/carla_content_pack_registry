@@ -21,7 +21,7 @@
 | 4 Cloudflare 本番対応 | 🟡 | Terraform（D1、DNS、WAF、レート制限、Bot）、wrangler 設定テンプレート、デプロイワークフロー、Cron によるクリーンアップ | `terraform validate` 成功、`wrangler deploy --dry-run` 成功（137 KiB）、workerd 上でスモークテスト成功。**apply / デプロイ / staging E2E は未実施** |
 | 5 AWS S3 対応 | 🟡 | STS AssumeRole、Registry 生成の ExternalId、読み取り専用セッションポリシー、一時資格情報キャッシュ、ExternalId ローテーション | STS をモックしたユニットテスト。**実 AWS では未検証** |
 | 6 AWS Registry 対応 | 🟡 | Lambda ハンドラ、DynamoDB 単一テーブル、DynamoDB レート制限、Secrets Manager、Terraform（API Gateway REST、WAF のステージ関連付け、KMS、CloudWatch、Budget）、OIDC bootstrap | Lambda ハンドラを API Gateway REST 形式のイベント + DynamoDB Local + SeaweedFS で E2E（Cloudflare 版と同一の契約テスト 18 シナリオ）。`terraform validate` 成功。**apply / デプロイは未実施** |
-| CLI `carla-pack` | 🟡 | Rust コア + Python フロントエンド（PyO3 / maturin、abi3 wheel）。`login`（GitHub デバイスフロー / トークン）、`logout`、`whoami`、`ls`、`pull`、`bucket add/show/set/credentials/verify/rm`、`acl show/add/rm/set`、`--json` | Rust テスト 10 件（Registry・ストレージ・GitHub はモックサーバー）、CLI E2E 4 件（wrangler dev + SeaweedFS、Mock 認証）。**本物の GitHub デバイスフローは未検証**。アップロード（`push`）は未実装 |
+| CLI `carla-pack` | 🟡 | Rust コア + Python フロントエンド（PyO3 / maturin、abi3 wheel）。`login`（GitHub デバイスフロー / トークン）、`logout`、`whoami`、`ls`、`pull`、`bucket add/show/set/credentials/verify/rm`、`acl show/add/rm/set`、`--json` | Rust テスト 15 件（Registry・ストレージ・GitHub はモックサーバー）、CLI E2E 3 件（wrangler dev + SeaweedFS、Mock 認証）。**本物の GitHub デバイスフローは未検証**。アップロード（`push`）は未実装 |
 | 7 品質・運用 | 🟡 一部 | CI、監査ログ、構造化ログ、Runbook、バックアップ/復旧手順、OpenAPI と実装の同期テスト | セキュリティテストはユニット/契約テストの範囲。ペネトレーションテスト、負荷試験、ダッシュボードは未実施 |
 
 ## テスト結果（このセッションでの実行）
@@ -33,8 +33,8 @@
 | ユニット + 契約（Memory / D1 SQLite / Fake S3） | `npm test` | 89 / 89 成功 |
 | 統合（Worker エントリ + D1 + SeaweedFS、Lambda ハンドラ + DynamoDB Local + SeaweedFS） | `npm run test:integration` | 36 / 36 成功 |
 | wrangler dev（workerd + D1 Local + SeaweedFS）スモーク | `npm run smoke` | 12 / 12 成功 |
-| CLI Rust コア | `cd cli && cargo test`（+ `cargo clippy -D warnings`、`cargo fmt --check`） | 10 / 10 成功 |
-| CLI E2E（wrangler dev に対して） | `cd cli && pytest` | 4 / 4 成功。release wheel を Python 3.12 のクリーンな venv に入れて動作確認 |
+| CLI Rust コア | `cd cli && cargo test`（+ `cargo clippy -D warnings`、`cargo fmt --check`） | 15 / 15 成功 |
+| CLI E2E（wrangler dev に対して） | `cd cli && pytest` | 3 / 3 成功。release wheel を Python 3.12 のクリーンな venv に入れて動作確認 |
 | ブラウザ UI（Chromium） | Playwright（手動スクリプト） | Mock ログイン → ACL に応じた一覧 → ダウンロード → ログアウト成功 |
 | OpenAPI | `redocly lint` | エラー・警告 0 |
 | Terraform | `terraform fmt` / `validate`（cloudflare, aws, aws/bootstrap） | 成功（※後述の制約） |

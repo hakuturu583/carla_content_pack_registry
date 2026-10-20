@@ -1,14 +1,18 @@
 //! GitHub OAuth device flow (https://docs.github.com/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#device-flow).
 //! The CLI never sees the OAuth client secret; the registry accepts the resulting
 //! token as `Authorization: Bearer`.
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use reqwest::blocking::Client as Http;
-use serde::{Deserialize, Serialize};
+use reqwest::blocking::{Client as Http, RequestBuilder};
+use serde::Deserialize;
 
+use crate::client::http_client;
 use crate::error::{Error, Result};
+use crate::store::normalize;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+const GITHUB_URL: &str = "https://github.com";
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct DeviceCode {
     pub device_code: String,
     pub user_code: String,
@@ -34,22 +38,51 @@ pub struct DeviceFlow {
 }
 
 impl DeviceFlow {
-    /// `github_url` is `https://github.com` except in tests.
+    /// GitHub at `CARLA_PACK_GITHUB_URL` (tests / GitHub Enterprise), default github.com.
+    pub fn from_env(client_id: &str) -> Result<Self> {
+        let url = std::env::var("CARLA_PACK_GITHUB_URL").ok().filter(|s| !s.is_empty());
+        Self::new(url.as_deref().unwrap_or(GITHUB_URL), client_id)
+    }
+
     pub fn new(github_url: &str, client_id: &str) -> Result<Self> {
-        let http = Http::builder()
-            .user_agent(concat!("carla-pack/", env!("CARGO_PKG_VERSION")))
+        Ok(Self { github: normalize(github_url), client_id: client_id.to_string(), http: http_client()? })
+    }
+
+    fn post(&self, path: &str) -> RequestBuilder {
+        self.http
+            .post(format!("{}{path}", self.github))
+            .header("accept", "application/json")
             .timeout(Duration::from_secs(30))
-            .build()?;
-        Ok(Self { github: github_url.trim_end_matches('/').to_string(), client_id: client_id.to_string(), http })
+    }
+
+    /// Polls until the user finishes in the browser, honouring `interval` and `slow_down`.
+    /// `keep_going` is called about once a second; returning false aborts with `Interrupted`.
+    pub fn wait(&self, code: &DeviceCode, mut keep_going: impl FnMut() -> bool) -> Result<String> {
+        let deadline = Instant::now() + Duration::from_secs(code.expires_in);
+        let mut interval = code.interval;
+        loop {
+            for _ in 0..interval.max(1) {
+                if !keep_going() {
+                    return Err(Error::Interrupted);
+                }
+                if interval > 0 {
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(Error::Usage("the login code expired; run `carla-pack login` again".into()));
+            }
+            match self.poll(&code.device_code)? {
+                Poll::Token(t) => return Ok(t),
+                Poll::Pending => {}
+                Poll::SlowDown(i) => interval = i,
+            }
+        }
     }
 
     pub fn start(&self, scope: &str) -> Result<DeviceCode> {
-        let res = self
-            .http
-            .post(format!("{}/login/device/code", self.github))
-            .header("accept", "application/json")
-            .form(&[("client_id", self.client_id.as_str()), ("scope", scope)])
-            .send()?;
+        let res =
+            self.post("/login/device/code").form(&[("client_id", self.client_id.as_str()), ("scope", scope)]).send()?;
         let body: serde_json::Value = res.json()?;
         if let Some(e) = body["error"].as_str() {
             let hint =
@@ -62,9 +95,7 @@ impl DeviceFlow {
     /// One poll of the token endpoint. Call it every `interval` seconds until it returns a token.
     pub fn poll(&self, device_code: &str) -> Result<Poll> {
         let res = self
-            .http
-            .post(format!("{}/login/oauth/access_token", self.github))
-            .header("accept", "application/json")
+            .post("/login/oauth/access_token")
             .form(&[
                 ("client_id", self.client_id.as_str()),
                 ("device_code", device_code),

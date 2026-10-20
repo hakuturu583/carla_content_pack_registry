@@ -1,38 +1,42 @@
 //! PyO3 bindings: the `carla_pack._core` extension module used by the Python frontend.
-//! Network calls release the GIL. JSON values cross the boundary as Python dicts/lists.
+//! Thin wrappers only; network calls release the GIL and JSON values cross the
+//! boundary as Python dicts/lists.
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
+use serde::Serialize;
 use serde_json::Value;
 
-use crate::auth::{DeviceFlow as CoreDeviceFlow, Poll};
-use crate::client::Client as CoreClient;
-use crate::error::Error;
+use crate::auth::DeviceFlow;
+use crate::client::{AclChange, AclRef, Client as CoreClient, display_ref};
+use crate::error::{Error, Result};
 use crate::store::{Login, Store};
 
-pyo3::create_exception!(
-    _core,
-    CarlaPackError,
-    PyException,
-    "Error raised by the carla-pack core. args = (message, code, status)."
-);
+pyo3::create_exception!(_core, CarlaPackError, PyException, "Error from the carla-pack core. args = (message, code).");
 
 fn to_py(e: Error) -> PyErr {
-    match &e {
-        Error::Api { status, code, message } => CarlaPackError::new_err((message.clone(), code.clone(), *status)),
-        Error::NotLoggedIn(_) => CarlaPackError::new_err((e.to_string(), "not_logged_in", 0u16)),
-        _ => CarlaPackError::new_err((e.to_string(), "client_error", 0u16)),
-    }
+    CarlaPackError::new_err((e.to_string(), e.code().to_string()))
 }
 
-fn to_object<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny>> {
-    py.import("json")?.call_method1("loads", (v.to_string(),))
+fn to_object<'py>(py: Python<'py>, v: &impl Serialize) -> PyResult<Bound<'py, PyAny>> {
+    let s = serde_json::to_string(v).map_err(|e| to_py(e.into()))?;
+    py.import("json")?.call_method1("loads", (s,))
 }
 
 fn from_object(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     let s: String = obj.py().import("json")?.call_method1("dumps", (obj,))?.extract()?;
     serde_json::from_str(&s).map_err(|e| to_py(e.into()))
+}
+
+/// Runs `f` without the GIL and converts its result to Python objects.
+fn call<'py, T: Serialize + Send>(
+    py: Python<'py>,
+    f: impl FnOnce() -> Result<T> + Send,
+) -> PyResult<Bound<'py, PyAny>> {
+    let v = py.detach(f).map_err(to_py)?;
+    to_object(py, &v)
 }
 
 #[pyclass(frozen)]
@@ -42,10 +46,16 @@ struct Client {
 
 #[pymethods]
 impl Client {
+    /// Registry from the argument / CARLA_PACK_REGISTRY / last login; token from
+    /// CARLA_PACK_TOKEN / the saved login. Raises not_logged_in when `require_auth`.
     #[new]
-    #[pyo3(signature = (registry_url, token=None))]
-    fn new(registry_url: &str, token: Option<String>) -> PyResult<Self> {
-        Ok(Self { inner: CoreClient::new(registry_url, token).map_err(to_py)? })
+    #[pyo3(signature = (registry=None, require_auth=true))]
+    fn new(registry: Option<&str>, require_auth: bool) -> PyResult<Self> {
+        Ok(Self { inner: CoreClient::from_store(registry, require_auth).map_err(to_py)? })
+    }
+
+    fn with_token(&self, token: String) -> Self {
+        Self { inner: self.inner.with_token(token) }
     }
 
     #[getter]
@@ -54,43 +64,30 @@ impl Client {
     }
 
     fn cli_config<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let v = py.detach(|| self.inner.cli_config()).map_err(to_py)?;
-        to_object(py, &v)
+        call(py, || self.inner.cli_config())
     }
 
     fn me<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let v = py.detach(|| self.inner.me()).map_err(to_py)?;
-        to_object(py, &v)
+        call(py, || self.inner.me())
     }
 
     fn list_buckets<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let v = py.detach(|| self.inner.list_buckets()).map_err(to_py)?;
-        to_object(py, &v["buckets"])
+        call(py, || self.inner.list_buckets())
     }
 
-    fn get_bucket<'py>(&self, py: Python<'py>, id: &str) -> PyResult<Bound<'py, PyAny>> {
-        let v = py.detach(|| self.inner.get_bucket(id)).map_err(to_py)?;
-        to_object(py, &v)
-    }
-
-    /// Resolves "owner/name", "name" or a UUID; returns the full bucket view.
+    /// Full bucket view for "owner/name", "name" or a UUID.
     fn resolve_bucket<'py>(&self, py: Python<'py>, reference: &str) -> PyResult<Bound<'py, PyAny>> {
-        let v = py
-            .detach(|| self.inner.resolve_bucket(reference).and_then(|b| self.inner.get_bucket(&b.id)))
-            .map_err(to_py)?;
-        to_object(py, &v)
+        call(py, || self.inner.resolve_bucket(reference))
     }
 
     fn create_bucket<'py>(&self, py: Python<'py>, body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let body = from_object(body)?;
-        let v = py.detach(|| self.inner.create_bucket(&body)).map_err(to_py)?;
-        to_object(py, &v)
+        call(py, || self.inner.create_bucket(&body))
     }
 
     fn update_bucket<'py>(&self, py: Python<'py>, id: &str, body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let body = from_object(body)?;
-        let v = py.detach(|| self.inner.update_bucket(id, &body)).map_err(to_py)?;
-        to_object(py, &v)
+        call(py, || self.inner.update_bucket(id, &body))
     }
 
     fn delete_bucket(&self, py: Python<'_>, id: &str) -> PyResult<()> {
@@ -98,92 +95,106 @@ impl Client {
     }
 
     fn verify_bucket<'py>(&self, py: Python<'py>, id: &str) -> PyResult<Bound<'py, PyAny>> {
-        let v = py.detach(|| self.inner.verify_bucket(id)).map_err(to_py)?;
-        to_object(py, &v)
+        call(py, || self.inner.verify_bucket(id))
     }
 
     fn put_credentials<'py>(&self, py: Python<'py>, id: &str, body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let body = from_object(body)?;
-        let v = py.detach(|| self.inner.put_credentials(id, &body)).map_err(to_py)?;
-        to_object(py, &v)
+        call(py, || self.inner.put_credentials(id, &body))
     }
 
     fn get_acl<'py>(&self, py: Python<'py>, id: &str) -> PyResult<Bound<'py, PyAny>> {
-        let v = py.detach(|| self.inner.get_acl(id)).map_err(to_py)?;
-        to_object(py, &v["entries"])
+        call(py, || self.inner.get_acl(id))
     }
 
-    fn put_acl<'py>(&self, py: Python<'py>, id: &str, entries: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-        let entries = from_object(entries)?;
-        let v = py.detach(|| self.inner.put_acl(id, &entries)).map_err(to_py)?;
-        to_object(py, &v["entries"])
-    }
-
-    #[pyo3(signature = (id, prefix=None, cursor=None, limit=100))]
-    fn list_objects<'py>(
+    /// mode: "set" | "add" | "rm"; teams as "ORG/SLUG".
+    #[pyo3(signature = (id, mode, users=vec![], orgs=vec![], teams=vec![]))]
+    fn update_acl<'py>(
         &self,
         py: Python<'py>,
         id: &str,
-        prefix: Option<&str>,
-        cursor: Option<&str>,
-        limit: u32,
+        mode: &str,
+        users: Vec<String>,
+        orgs: Vec<String>,
+        teams: Vec<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let v = py.detach(|| self.inner.list_objects(id, prefix, cursor, limit)).map_err(to_py)?;
-        to_object(py, &v)
+        let change = match mode {
+            "set" => AclChange::Set,
+            "add" => AclChange::Add,
+            "rm" => AclChange::Remove,
+            _ => return Err(to_py(Error::Usage(format!("unknown ACL mode {mode:?}")))),
+        };
+        let refs = [("user", users), ("org", orgs), ("team", teams)]
+            .into_iter()
+            .flat_map(|(kind, values)| values.into_iter().map(move |v| AclRef::parse(kind, &v)))
+            .collect::<Result<Vec<_>>>()
+            .map_err(to_py)?;
+        call(py, || self.inner.update_acl(id, change, refs))
     }
 
-    /// Every object under `prefix` as (key, size) tuples.
+    /// Every object under `prefix`: [{key, size}].
     #[pyo3(signature = (id, prefix=None))]
-    fn list_all_objects(&self, py: Python<'_>, id: &str, prefix: Option<&str>) -> PyResult<Vec<(String, u64)>> {
-        let objs = py.detach(|| self.inner.list_all_objects(id, prefix)).map_err(to_py)?;
-        Ok(objs.into_iter().map(|o| (o.key, o.size)).collect())
+    fn list_objects<'py>(&self, py: Python<'py>, id: &str, prefix: Option<&str>) -> PyResult<Bound<'py, PyAny>> {
+        call(py, || self.inner.list_objects(id, prefix))
     }
 
-    /// Downloads one object to `dest`; returns bytes written.
-    fn download(&self, py: Python<'_>, id: &str, key: &str, dest: PathBuf) -> PyResult<u64> {
-        py.detach(|| self.inner.download(id, key, &dest)).map_err(to_py)
+    /// Downloads into `out_dir`; `on_event(dict)` is called per object. Returns bytes downloaded.
+    #[pyo3(signature = (id, targets, out_dir, force=false, jobs=4, on_event=None))]
+    #[allow(clippy::too_many_arguments)] // mirrors the Python keyword arguments
+    fn pull(
+        &self,
+        py: Python<'_>,
+        id: &str,
+        targets: Vec<String>,
+        out_dir: PathBuf,
+        force: bool,
+        jobs: usize,
+        on_event: Option<Py<PyAny>>,
+    ) -> PyResult<u64> {
+        let callback_error: Mutex<Option<PyErr>> = Mutex::new(None);
+        let total = py
+            .detach(|| {
+                self.inner.pull(id, &targets, &out_dir, force, jobs, |event| {
+                    if let Some(cb) = &on_event {
+                        Python::attach(|py| {
+                            if let Err(e) = to_object(py, &event).and_then(|ev| cb.call1(py, (ev,))) {
+                                callback_error.lock().unwrap().get_or_insert(e);
+                            }
+                        });
+                    }
+                })
+            })
+            .map_err(to_py)?;
+        match callback_error.into_inner().unwrap() {
+            Some(e) => Err(e),
+            None => Ok(total),
+        }
     }
 }
 
-#[pyclass(frozen)]
-struct DeviceFlow {
-    inner: CoreDeviceFlow,
-}
-
-#[pymethods]
-impl DeviceFlow {
-    #[new]
-    fn new(github_url: &str, client_id: &str) -> PyResult<Self> {
-        Ok(Self { inner: CoreDeviceFlow::new(github_url, client_id).map_err(to_py)? })
-    }
-
-    /// Returns {device_code, user_code, verification_uri, expires_in, interval}.
-    fn start<'py>(&self, py: Python<'py>, scope: &str) -> PyResult<Bound<'py, PyAny>> {
-        let code = py.detach(|| self.inner.start(scope)).map_err(to_py)?;
-        to_object(py, &serde_json::to_value(code).map_err(|e| to_py(e.into()))?)
-    }
-
-    /// One poll: ("token", token) | ("pending", None) | ("slow_down", new_interval).
-    fn poll(&self, py: Python<'_>, device_code: &str) -> PyResult<(String, Option<String>, Option<u64>)> {
-        Ok(match py.detach(|| self.inner.poll(device_code)).map_err(to_py)? {
-            Poll::Token(t) => ("token".into(), Some(t), None),
-            Poll::Pending => ("pending".into(), None, None),
-            Poll::SlowDown(i) => ("slow_down".into(), None, Some(i)),
+/// GitHub device-flow login: calls `on_code(verification_uri, user_code)`, then waits
+/// for the browser step (Ctrl-C aborts). Returns the access token.
+#[pyfunction]
+fn device_login(py: Python<'_>, client_id: &str, scope: &str, on_code: Bound<'_, PyAny>) -> PyResult<String> {
+    let flow = DeviceFlow::from_env(client_id).map_err(to_py)?;
+    let code = py.detach(|| flow.start(scope)).map_err(to_py)?;
+    on_code.call1((&code.verification_uri, &code.user_code))?;
+    let interrupted: Mutex<Option<PyErr>> = Mutex::new(None);
+    let token = py.detach(|| {
+        flow.wait(&code, || {
+            Python::attach(|py| py.check_signals()).map_err(|e| *interrupted.lock().unwrap() = Some(e)).is_ok()
         })
+    });
+    match (token, interrupted.into_inner().unwrap()) {
+        (_, Some(e)) => Err(e),
+        (t, None) => t.map_err(to_py),
     }
 }
 
-/// Registry URL to use (argument, CARLA_PACK_REGISTRY, saved default, then localhost).
+/// "owner/name" for a bucket view.
 #[pyfunction]
-#[pyo3(signature = (explicit=None))]
-fn resolve_registry(explicit: Option<&str>) -> PyResult<String> {
-    Ok(Store::load().map_err(to_py)?.registry(explicit))
-}
-
-/// Token for a registry (CARLA_PACK_TOKEN, then the saved login), or None.
-#[pyfunction]
-fn stored_token(registry: &str) -> PyResult<Option<String>> {
-    Ok(Store::load().map_err(to_py)?.token(registry))
+fn bucket_ref(bucket: &Bound<'_, PyAny>) -> PyResult<String> {
+    Ok(display_ref(&from_object(bucket)?))
 }
 
 #[pyfunction]
@@ -193,17 +204,15 @@ fn save_login(registry: &str, token: String, login: String) -> PyResult<()> {
     s.save().map_err(to_py)
 }
 
+/// Forgets the token for the selected registry; returns (registry, removed).
 #[pyfunction]
-fn remove_login(registry: &str) -> PyResult<bool> {
+#[pyo3(signature = (registry=None))]
+fn remove_login(registry: Option<&str>) -> PyResult<(String, bool)> {
     let mut s = Store::load().map_err(to_py)?;
-    let removed = s.remove_login(registry);
+    let registry = s.registry(registry);
+    let removed = s.remove_login(&registry);
     s.save().map_err(to_py)?;
-    Ok(removed)
-}
-
-#[pyfunction]
-fn config_dir() -> PyResult<PathBuf> {
-    crate::store::config_dir().map_err(to_py)
+    Ok((registry, removed))
 }
 
 #[pymodule]
@@ -211,11 +220,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("CarlaPackError", m.py().get_type::<CarlaPackError>())?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<Client>()?;
-    m.add_class::<DeviceFlow>()?;
-    m.add_function(wrap_pyfunction!(resolve_registry, m)?)?;
-    m.add_function(wrap_pyfunction!(stored_token, m)?)?;
+    m.add_function(wrap_pyfunction!(device_login, m)?)?;
+    m.add_function(wrap_pyfunction!(bucket_ref, m)?)?;
     m.add_function(wrap_pyfunction!(save_login, m)?)?;
     m.add_function(wrap_pyfunction!(remove_login, m)?)?;
-    m.add_function(wrap_pyfunction!(config_dir, m)?)?;
     Ok(())
 }

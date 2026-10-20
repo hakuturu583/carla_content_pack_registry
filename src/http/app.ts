@@ -92,7 +92,13 @@ export function createApp(getServices: ServicesProvider): Hono<Env> {
   // Public bootstrap info for the carla-pack CLI (device-flow login needs the OAuth client ID).
   app.get('/cli/config', (c) => {
     const s = c.get('services');
-    return c.json({ authMode: s.config.authMode, githubClientId: s.config.github?.clientId ?? null, oauthScopes: OAUTH_SCOPES });
+    return c.json({
+      authMode: s.config.authMode,
+      githubClientId: s.config.github?.clientId ?? null,
+      oauthScopes: OAUTH_SCOPES,
+      // Shown by the CLI when device login is unavailable.
+      loginHint: s.config.authMode === 'mock' ? 'local development registry: use `carla-pack login --token mock:<alice|bob|carol>`' : null,
+    });
   });
 
   app.get('/', (c) => {

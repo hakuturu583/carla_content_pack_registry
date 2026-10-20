@@ -2,6 +2,8 @@
 (wrangler dev + SeaweedFS, see the repository README). Skipped when it is not running.
 
     CARLA_PACK_TEST_REGISTRY=http://localhost:8787 pytest
+
+Set CARLA_PACK_REQUIRE_REGISTRY=1 (CI) to fail instead of skipping when it is not reachable.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from carla_pack.cli import CliError, _safe_dest, main
+from carla_pack.cli import main
 
 REGISTRY = os.environ.get("CARLA_PACK_TEST_REGISTRY", "http://localhost:8787")
 ALICE_SECRET = "local-alice-secret-not-for-production"
@@ -28,7 +30,10 @@ def _registry_up() -> bool:
         return False
 
 
-needs_registry = pytest.mark.skipif(not _registry_up(), reason=f"no mock-mode registry at {REGISTRY}")
+_UP = _registry_up()
+if not _UP and os.environ.get("CARLA_PACK_REQUIRE_REGISTRY") == "1":
+    raise RuntimeError(f"CARLA_PACK_REQUIRE_REGISTRY=1 but no mock-mode registry at {REGISTRY}")
+needs_registry = pytest.mark.skipif(not _UP, reason=f"no mock-mode registry at {REGISTRY}")
 
 
 @pytest.fixture
@@ -47,13 +52,6 @@ def cli(tmp_path, monkeypatch, capsys):
     return run
 
 
-def test_safe_dest_refuses_escaping_keys(tmp_path):
-    assert _safe_dest(tmp_path, "maps/a.tar") == tmp_path / "maps" / "a.tar"
-    for bad in ["../x", "maps/../../x", "/", ".", ""]:
-        with pytest.raises(CliError):
-            _safe_dest(tmp_path, bad)
-
-
 def test_requires_login(cli):
     code, _, err = cli("ls")
     assert code == 1 and "carla-pack login" in err
@@ -62,7 +60,7 @@ def test_requires_login(cli):
 @needs_registry
 def test_mock_registry_has_no_device_login(cli):
     code, _, err = cli("login")
-    assert code == 1 and "--token mock:alice" in err
+    assert code == 1 and "--token mock:" in err  # hint comes from the server
 
 
 @needs_registry
@@ -97,13 +95,15 @@ def test_owner_registers_shares_and_reader_downloads(cli, monkeypatch, tmp_path)
     assert "maps/Town10HD_Opt.tar.zst" in out and "vehicles/" not in out
 
     dest = tmp_path / "out"
-    code, out, err = cli("pull", ref, "maps/", "vehicles/sedan with space.tar.zst", "-o", str(dest))
+    code, out, err = cli("pull", ref, "maps/", "vehicles/sedan with space.tar.zst", "-o", str(dest), "-j", "2")
     assert code == 0, err
     assert (dest / "maps" / "readme.md").read_text() == "# Alice maps\n"
     assert (dest / "vehicles" / "sedan with space.tar.zst").read_text() == "fake vehicle pack\n"
     code, out, _ = cli("pull", ref, "maps/readme.md", "-o", str(dest))
     assert "skip" in out
     assert not list(dest.rglob("*.part"))
+    code, _, err = cli("pull", ref, "../escape.txt", "-o", str(dest))
+    assert code == 1 and "outside the output directory" in err
 
     code, _, err = cli("bucket", "rm", ref, "--yes")
     assert code == 1 and "owner" in err  # bob cannot manage alice's bucket

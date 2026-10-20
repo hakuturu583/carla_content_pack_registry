@@ -41,7 +41,8 @@ export function defineApiScenarios(label: string, setup: () => Promise<ApiClient
       expect(r.status).toBe(200);
       expect(r.body.status).toBe('ok');
       const cfg = await api.call('GET', '/cli/config');
-      expect(cfg.body).toEqual({ authMode: 'mock', githubClientId: null, oauthScopes: 'read:org' });
+      expect(cfg.body).toMatchObject({ authMode: 'mock', githubClientId: null, oauthScopes: 'read:org' });
+      expect(cfg.body.loginHint).toContain('--token mock:');
     });
 
     it('rejects unauthenticated API calls', async () => {

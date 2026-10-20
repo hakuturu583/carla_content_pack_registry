@@ -1,5 +1,6 @@
-"""`carla-pack` command line interface. Argument parsing and output only; the work is
-done by the Rust core (carla_pack._core)."""
+"""`carla-pack` command line interface: argument parsing, prompts and output only.
+The work (HTTP, login, credential storage, ACL edits, downloads) is done by the Rust
+core in carla_pack._core."""
 
 from __future__ import annotations
 
@@ -8,14 +9,10 @@ import getpass
 import json
 import os
 import sys
-import time
-from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from . import _core
 from ._core import CarlaPackError, Client
-
-GITHUB_URL = os.environ.get("CARLA_PACK_GITHUB_URL", "https://github.com")
 
 
 class CliError(Exception):
@@ -25,12 +22,13 @@ class CliError(Exception):
 # --------------------------------------------------------------------------- helpers
 
 
-def _client(args: argparse.Namespace, *, auth: bool = True) -> Client:
-    registry = _core.resolve_registry(args.registry)
-    token = _core.stored_token(registry)
-    if auth and not token:
-        raise CliError(f"not logged in to {registry}; run `carla-pack login`")
-    return Client(registry, token)
+def _client(args: argparse.Namespace) -> Client:
+    return Client(args.registry)
+
+
+def _resolve(args: argparse.Namespace) -> tuple[Client, dict[str, Any]]:
+    client = _client(args)
+    return client, client.resolve_bucket(args.bucket)
 
 
 def _out(args: argparse.Namespace, data: Any, human: Callable[[], None]) -> None:
@@ -40,8 +38,9 @@ def _out(args: argparse.Namespace, data: Any, human: Callable[[], None]) -> None
         human()
 
 
-def _table(rows: list[list[str]], header: list[str]) -> None:
+def _table(rows: list[list[str]], header: list[str], empty: str) -> None:
     if not rows:
+        print(empty)
         return
     widths = [max(len(str(r[i])) for r in [header, *rows]) for i in range(len(header))]
     for r in [header, *rows]:
@@ -50,15 +49,11 @@ def _table(rows: list[list[str]], header: list[str]) -> None:
 
 def _size(n: int) -> str:
     size = float(n)
-    for unit in ("B", "KiB", "MiB", "GiB"):
-        if size < 1024 or unit == "GiB":
-            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+    for unit in ("B", "KiB", "MiB"):
+        if size < 1024:
+            return f"{n} B" if unit == "B" else f"{size:.1f} {unit}"
         size /= 1024
-    return f"{n} B"
-
-
-def _ref(b: dict[str, Any]) -> str:
-    return f"{b['owner'].get('login') or b['owner']['id']}/{b['name']}"
+    return f"{size:.1f} GiB"
 
 
 def _secret(env: str, prompt: str) -> str:
@@ -81,8 +76,8 @@ def _static_credentials(args: argparse.Namespace) -> dict[str, str]:
     }
 
 
-def _print_bucket(b: dict[str, Any]) -> None:
-    print(f"{_ref(b)}  ({b['id']})")
+def _print_bucket(b: dict[str, Any], next_step: str | None = None) -> None:
+    print(f"{_core.bucket_ref(b)}  ({b['id']})")
     print(f"  visibility : {b['visibility']}")
     print(f"  provider   : {b['provider']}")
     status = b["verifyStatus"] + (f" ({b['verifyDetail']})" if b.get("verifyDetail") else "")
@@ -97,50 +92,43 @@ def _print_bucket(b: dict[str, Any]) -> None:
         print("  AWS role trust policy must allow:")
         print(f"    principal  : {trust.get('principalArn') or '(ask the registry operator)'}")
         print(f"    externalId : {trust['externalId']}")
+    if next_step:
+        print(f"\n{next_step}")
+
+
+def _print_acl(entries: list[dict[str, Any]]) -> None:
+    _table(
+        [[e["type"], e["name"], str(e["id"])] for e in entries],
+        ["TYPE", "NAME", "GITHUB ID"],
+        "(no entries: only the owner can read this bucket unless it is public)",
+    )
 
 
 # --------------------------------------------------------------------------- auth
 
 
 def cmd_login(args: argparse.Namespace) -> int:
-    registry = _core.resolve_registry(args.registry)
-    client = Client(registry)
-    token = args.token or (os.environ.get("CARLA_PACK_TOKEN") if args.token_from_env else None)
+    client = Client(args.registry, require_auth=False)
+    token = args.token
     if not token:
         cfg = client.cli_config()
         if not cfg.get("githubClientId"):
-            raise CliError(
-                f"{registry} does not offer GitHub device login (authMode={cfg.get('authMode')}). "
-                "For local development use: carla-pack login --token mock:alice"
-            )
-        token = _device_login(cfg["githubClientId"], cfg.get("oauthScopes", "read:org"))
-    me = Client(registry, token).me()
-    _core.save_login(registry, token, me["user"]["login"])
-    print(f"Logged in to {registry} as {me['user']['login']}")
+            raise CliError(cfg.get("loginHint") or f"{client.registry_url} does not offer GitHub device login")
+        token = _core.device_login(
+            cfg["githubClientId"],
+            cfg["oauthScopes"],
+            lambda uri, code: print(f"Open {uri} and enter the code: {code}", flush=True),
+        )
+    me = client.with_token(token).me()
+    _core.save_login(client.registry_url, token, me["user"]["login"])
+    print(f"Logged in to {client.registry_url} as {me['user']['login']}")
     if me.get("membershipError"):
         print(f"warning: {me['membershipError']}", file=sys.stderr)
     return 0
 
 
-def _device_login(client_id: str, scope: str) -> str:
-    flow = _core.DeviceFlow(GITHUB_URL, client_id)
-    code = flow.start(scope)
-    print(f"Open {code['verification_uri']} and enter the code: {code['user_code']}")
-    interval = int(code["interval"])
-    deadline = time.monotonic() + int(code["expires_in"])
-    while time.monotonic() < deadline:
-        time.sleep(interval)
-        state, token, new_interval = flow.poll(code["device_code"])
-        if state == "token" and token:
-            return token
-        if state == "slow_down" and new_interval:
-            interval = new_interval
-    raise CliError("the login code expired; run `carla-pack login` again")
-
-
 def cmd_logout(args: argparse.Namespace) -> int:
-    registry = _core.resolve_registry(args.registry)
-    removed = _core.remove_login(registry)
+    registry, removed = _core.remove_login(args.registry)
     print(f"Logged out of {registry}" if removed else f"Not logged in to {registry}")
     return 0
 
@@ -166,145 +154,92 @@ def cmd_whoami(args: argparse.Namespace) -> int:
 
 
 def cmd_ls(args: argparse.Namespace) -> int:
-    client = _client(args)
     if not args.bucket:
-        buckets = client.list_buckets()
-
-        def human_buckets() -> None:
-            if not buckets:
-                print("No buckets.")
-            _table(
-                [[_ref(b), b["visibility"], b["provider"], b["verifyStatus"]] for b in buckets],
-                ["BUCKET", "VISIBILITY", "PROVIDER", "STATUS"],
-            )
-
-        _out(args, buckets, human_buckets)
+        buckets = _client(args).list_buckets()
+        rows = [[_core.bucket_ref(b), b["visibility"], b["provider"], b["verifyStatus"]] for b in buckets]
+        _out(args, buckets, lambda: _table(rows, ["BUCKET", "VISIBILITY", "PROVIDER", "STATUS"], "No buckets."))
         return 0
-
-    bucket = client.resolve_bucket(args.bucket)
-    objects = client.list_all_objects(bucket["id"], args.prefix)
-
-    def human_objects() -> None:
-        if not objects:
-            print("No objects.")
-        _table([[k, _size(s)] for k, s in objects], ["KEY", "SIZE"])
-
-    _out(args, [{"key": k, "size": s} for k, s in objects], human_objects)
+    client, bucket = _resolve(args)
+    objects = client.list_objects(bucket["id"], args.prefix)
+    rows = [[o["key"], _size(o["size"])] for o in objects]
+    _out(args, objects, lambda: _table(rows, ["KEY", "SIZE"], "No objects."))
     return 0
 
 
 def cmd_pull(args: argparse.Namespace) -> int:
-    client = _client(args)
-    bucket = client.resolve_bucket(args.bucket)
-    out_dir = Path(args.output)
-    # Exact keys, plus everything under arguments ending with "/" (or the whole bucket).
-    keys: list[tuple[str, int | None]] = []
-    targets = args.keys or [""]
-    for t in targets:
-        if t == "" or t.endswith("/"):
-            keys.extend(client.list_all_objects(bucket["id"], t or None))
+    client, bucket = _resolve(args)
+
+    def on_event(e: dict[str, Any]) -> None:
+        if e["event"] == "skipped":
+            print(f"skip   {e['key']} (exists; use --force to overwrite)", flush=True)
         else:
-            keys.append((t, None))
-    if not keys:
-        raise CliError("nothing to download")
-    total = 0
-    for key, _ in keys:
-        dest = _safe_dest(out_dir, key)
-        if dest.exists() and not args.force:
-            print(f"skip   {key} (exists; use --force to overwrite)")
-            continue
-        n = client.download(bucket["id"], key, dest)
-        total += n
-        print(f"pulled {key} -> {dest} ({_size(n)})")
-    print(f"done: {_size(total)} from {_ref(bucket)}")
+            print(f"pulled {e['key']} -> {e['dest']} ({_size(e['bytes'])})", flush=True)
+
+    total = client.pull(bucket["id"], args.keys, args.output, force=args.force, jobs=args.jobs, on_event=on_event)
+    print(f"done: {_size(total)} from {_core.bucket_ref(bucket)}")
     return 0
-
-
-def _safe_dest(out_dir: Path, key: str) -> Path:
-    """Maps an object key below out_dir, refusing keys that would escape it."""
-    parts = [p for p in PurePosixPath(key).parts if p not in ("", "/")]
-    if not parts or any(p in (".", "..") for p in parts):
-        raise CliError(f"refusing to write object key {key!r} outside the output directory")
-    return out_dir.joinpath(*parts)
 
 
 # --------------------------------------------------------------------------- bucket management
 
 
 def cmd_bucket_add(args: argparse.Namespace) -> int:
-    client = _client(args)
-    storage: dict[str, str] = {"provider": args.provider, "bucket": args.bucket}
+    storage: dict[str, str] = {"provider": args.provider, "bucket": args.bucket_name}
     body: dict[str, Any] = {
         "name": args.name,
         "visibility": "public" if args.public else "private",
         "description": args.description or "",
         "storage": storage,
     }
-    if args.provider == "r2":
-        if not args.account_id:
-            raise CliError("--account-id is required for R2")
-        storage["accountId"] = args.account_id
-        body["credentials"] = _static_credentials(args)
-    elif args.provider == "s3":
+    if args.provider == "s3":
         if not (args.region and args.role_arn):
             raise CliError("--region and --role-arn are required for S3")
         storage.update(region=args.region, roleArn=args.role_arn)
     else:
+        if args.provider == "r2":
+            if not args.account_id:
+                raise CliError("--account-id is required for R2")
+            storage["accountId"] = args.account_id
         body["credentials"] = _static_credentials(args)
-    b = client.create_bucket(body)
-
-    def human() -> None:
-        _print_bucket(b)
-        print(f"\nNext: configure access, then run `carla-pack bucket verify {_ref(b)}`")
-
-    _out(args, b, human)
+    b = _client(args).create_bucket(body)
+    next_step = f"Next: configure access, then run `carla-pack bucket verify {_core.bucket_ref(b)}`"
+    _out(args, b, lambda: _print_bucket(b, next_step))
     return 0
 
 
 def cmd_bucket_show(args: argparse.Namespace) -> int:
-    b = _client(args).resolve_bucket(args.bucket)
+    _, b = _resolve(args)
     _out(args, b, lambda: _print_bucket(b))
     return 0
 
 
 def cmd_bucket_set(args: argparse.Namespace) -> int:
-    client = _client(args)
-    b = client.resolve_bucket(args.bucket)
-    patch: dict[str, str] = {}
-    if args.name:
-        patch["name"] = args.name
-    if args.description is not None:
-        patch["description"] = args.description
-    if args.visibility:
-        patch["visibility"] = args.visibility
+    fields = (("name", args.name), ("description", args.description), ("visibility", args.visibility))
+    patch = {k: v for k, v in fields if v is not None}
     if not patch:
         raise CliError("nothing to change (use --name, --description, --public or --private)")
+    client, b = _resolve(args)
     updated = client.update_bucket(b["id"], patch)
     _out(args, updated, lambda: _print_bucket(updated))
     return 0
 
 
 def cmd_bucket_credentials(args: argparse.Namespace) -> int:
-    client = _client(args)
-    b = client.resolve_bucket(args.bucket)
+    client, b = _resolve(args)
     if b["provider"] == "s3":
-        role = args.role_arn or b.get("storage", {}).get("roleArn")
-        body: dict[str, Any] = {"roleArn": role, "rotateExternalId": args.rotate_external_id}
+        body: dict[str, Any] = {
+            "roleArn": args.role_arn or b.get("storage", {}).get("roleArn"),
+            "rotateExternalId": args.rotate_external_id,
+        }
     else:
         body = _static_credentials(args)
     updated = client.put_credentials(b["id"], body)
-
-    def human() -> None:
-        _print_bucket(updated)
-        print(f"\nRun `carla-pack bucket verify {_ref(updated)}`")
-
-    _out(args, updated, human)
+    _out(args, updated, lambda: _print_bucket(updated, f"Run `carla-pack bucket verify {_core.bucket_ref(updated)}`"))
     return 0
 
 
 def cmd_bucket_verify(args: argparse.Namespace) -> int:
-    client = _client(args)
-    b = client.resolve_bucket(args.bucket)
+    client, b = _resolve(args)
     result = client.verify_bucket(b["id"])
     report = result["report"]
 
@@ -320,75 +255,32 @@ def cmd_bucket_verify(args: argparse.Namespace) -> int:
 
 
 def cmd_bucket_rm(args: argparse.Namespace) -> int:
-    client = _client(args)
-    b = client.resolve_bucket(args.bucket)
+    client, b = _resolve(args)
+    ref = _core.bucket_ref(b)
     if not args.yes:
         if not sys.stdin.isatty():
             raise CliError("pass --yes to deregister without a prompt")
-        answer = input(f"Deregister {_ref(b)}? Files in storage are NOT deleted. [y/N] ")
-        if answer.strip().lower() not in ("y", "yes"):
+        if input(f"Deregister {ref}? Files in storage are NOT deleted. [y/N] ").strip().lower() not in ("y", "yes"):
             print("aborted")
             return 1
     client.delete_bucket(b["id"])
-    print(f"deregistered {_ref(b)} (storage contents are untouched)")
+    print(f"deregistered {ref} (storage contents are untouched)")
     return 0
 
 
 # --------------------------------------------------------------------------- ACL
 
 
-def _acl_refs(args: argparse.Namespace) -> list[dict[str, str]]:
-    refs: list[dict[str, str]] = [{"type": "user", "login": u} for u in args.user or []]
-    refs += [{"type": "org", "login": o} for o in args.org or []]
-    for t in args.team or []:
-        org, sep, slug = t.partition("/")
-        if not sep or not org or not slug:
-            raise CliError(f"--team must look like ORG/TEAM-SLUG, got {t!r}")
-        refs.append({"type": "team", "org": org, "slug": slug})
-    return refs
-
-
-def _as_ref(e: dict[str, Any]) -> dict[str, str]:
-    """Converts a stored entry back to the name form the API accepts."""
-    if e["type"] == "team":
-        org, _, slug = e["name"].partition("/")
-        return {"type": "team", "org": org, "slug": slug}
-    return {"type": e["type"], "login": e["name"]}
-
-
-def _ref_key(r: dict[str, str]) -> str:
-    return (f"team:{r['org']}/{r['slug']}" if r["type"] == "team" else f"{r['type']}:{r['login']}").lower()
-
-
-def _print_acl(entries: list[dict[str, Any]]) -> None:
-    if not entries:
-        print("(no entries: only the owner can read this bucket unless it is public)")
-    _table([[e["type"], e["name"], str(e["id"])] for e in entries], ["TYPE", "NAME", "GITHUB ID"])
-
-
 def cmd_acl_show(args: argparse.Namespace) -> int:
-    client = _client(args)
-    entries = client.get_acl(client.resolve_bucket(args.bucket)["id"])
+    client, b = _resolve(args)
+    entries = client.get_acl(b["id"])
     _out(args, entries, lambda: _print_acl(entries))
     return 0
 
 
 def cmd_acl_change(args: argparse.Namespace) -> int:
-    client = _client(args)
-    bucket_id = client.resolve_bucket(args.bucket)["id"]
-    given = _acl_refs(args)
-    if args.acl_command == "set":
-        refs = given
-    else:
-        if not given:
-            raise CliError("specify at least one --user, --org or --team")
-        current = [_as_ref(e) for e in client.get_acl(bucket_id)]
-        if args.acl_command == "add":
-            refs = current + given
-        else:
-            drop = {_ref_key(r) for r in given}
-            refs = [r for r in current if _ref_key(r) not in drop]
-    entries = client.put_acl(bucket_id, refs)
+    client, b = _resolve(args)
+    entries = client.update_acl(b["id"], args.acl_command, args.user or [], args.org or [], args.team or [])
     _out(args, entries, lambda: _print_acl(entries))
     return 0
 
@@ -396,120 +288,103 @@ def cmd_acl_change(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- parser
 
 
-def build_parser() -> argparse.ArgumentParser:
-    # Global options are accepted before or after the subcommand. SUPPRESS keeps a
-    # subcommand's (absent) option from overwriting one given before it.
-    common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--registry", default=argparse.SUPPRESS, help="registry URL (default: CARLA_PACK_REGISTRY or the last login)")
-    common.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="machine-readable output")
-
-    p = argparse.ArgumentParser(
-        prog="carla-pack",
-        description="Discover, share and download CARLA Content Packs.",
-        parents=[common],
+def _add_globals(p: argparse.ArgumentParser, *, top: bool) -> None:
+    """--registry/--json work before or after the subcommand. Each parser gets its own
+    option objects; on subcommands they default to SUPPRESS so they do not overwrite a
+    value given before the subcommand."""
+    p.add_argument(
+        "--registry",
+        default=None if top else argparse.SUPPRESS,
+        help="registry URL (default: CARLA_PACK_REGISTRY or the last login)",
     )
+    p.add_argument(
+        "--json", action="store_true", default=False if top else argparse.SUPPRESS, help="machine-readable output"
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="carla-pack", description="Discover, share and download CARLA Content Packs.")
+    _add_globals(p, top=True)
     p.add_argument("--version", action="version", version=f"carla-pack {_core.__version__}")
     sub = p.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
-    s = sub.add_parser("login", parents=[common], help="log in with GitHub (device flow)")
-    s.add_argument("--token", help="use an existing GitHub token instead of the browser flow (local: mock:<user>)")
-    s.add_argument("--token-from-env", action="store_true", help="read the token from CARLA_PACK_TOKEN")
-    s.set_defaults(func=cmd_login)
+    def command(parent: Any, name: str, help: str, func: Callable[..., int] | None = None, *, bucket: bool = False):
+        s = parent.add_parser(name, help=help)
+        _add_globals(s, top=False)
+        if bucket:
+            s.add_argument("bucket", help="OWNER/NAME, NAME or bucket id")
+        if func:
+            s.set_defaults(func=func)
+        return s
 
-    s = sub.add_parser("logout", parents=[common], help="forget the stored token")
-    s.set_defaults(func=cmd_logout)
+    s = command(sub, "login", "log in with GitHub (device flow)", cmd_login)
+    s.add_argument("--token", help="use an existing GitHub token instead of the browser flow")
+    command(sub, "logout", "forget the stored token", cmd_logout)
+    command(sub, "whoami", "show the logged-in GitHub user", cmd_whoami)
 
-    s = sub.add_parser("whoami", parents=[common], help="show the logged-in GitHub user")
-    s.set_defaults(func=cmd_whoami)
-
-    s = sub.add_parser("ls", parents=[common], help="list buckets, or objects in a bucket")
+    s = command(sub, "ls", "list buckets, or objects in a bucket", cmd_ls)
     s.add_argument("bucket", nargs="?", help="OWNER/NAME, NAME or bucket id")
     s.add_argument("prefix", nargs="?", help="only objects under this key prefix")
-    s.set_defaults(func=cmd_ls)
 
-    s = sub.add_parser("pull", parents=[common], help="download objects (directly from storage)")
-    s.add_argument("bucket", help="OWNER/NAME, NAME or bucket id")
+    s = command(sub, "pull", "download objects (directly from storage)", cmd_pull, bucket=True)
     s.add_argument("keys", nargs="*", help="object keys; a trailing / downloads a prefix (default: everything)")
     s.add_argument("-o", "--output", default=".", help="output directory (default: current directory)")
     s.add_argument("-f", "--force", action="store_true", help="overwrite existing files")
-    s.set_defaults(func=cmd_pull)
+    s.add_argument("-j", "--jobs", type=int, default=4, help="parallel downloads (default: 4)")
 
-    b = sub.add_parser("bucket", parents=[common], help="register and manage your buckets")
-    bsub = b.add_subparsers(dest="bucket_command", required=True, metavar="ACTION")
-
-    s = bsub.add_parser("add", parents=[common], help="register a bucket you own")
+    bsub = command(sub, "bucket", "register and manage your buckets").add_subparsers(
+        dest="bucket_command", required=True, metavar="ACTION"
+    )
+    s = command(bsub, "add", "register a bucket you own", cmd_bucket_add)
     s.add_argument("name", help="display name in the registry")
     s.add_argument("--provider", choices=["r2", "s3", "local"], required=True)
-    s.add_argument("--bucket", required=True, help="bucket name in R2/S3")
+    s.add_argument("--bucket", dest="bucket_name", required=True, help="bucket name in R2/S3")
     s.add_argument("--account-id", help="Cloudflare account id (R2)")
     s.add_argument("--region", help="AWS region (S3)")
     s.add_argument("--role-arn", help="IAM role the registry assumes (S3)")
-    s.add_argument("--access-key-id", help="bucket-scoped access key id (R2/local); secret via CARLA_PACK_SECRET_ACCESS_KEY or prompt")
+    s.add_argument(
+        "--access-key-id", help="bucket-scoped key id (R2/local); secret via CARLA_PACK_SECRET_ACCESS_KEY or prompt"
+    )
     s.add_argument("--public", action="store_true", help="readable by every signed-in GitHub user (default: private)")
     s.add_argument("--description")
-    s.set_defaults(func=cmd_bucket_add)
-
-    s = bsub.add_parser("show", parents=[common], help="show bucket details")
-    s.add_argument("bucket")
-    s.set_defaults(func=cmd_bucket_show)
-
-    s = bsub.add_parser("set", parents=[common], help="change name, description or visibility")
-    s.add_argument("bucket")
+    command(bsub, "show", "show bucket details", cmd_bucket_show, bucket=True)
+    s = command(bsub, "set", "change name, description or visibility", cmd_bucket_set, bucket=True)
     s.add_argument("--name")
     s.add_argument("--description")
     vis = s.add_mutually_exclusive_group()
     vis.add_argument("--public", dest="visibility", action="store_const", const="public")
     vis.add_argument("--private", dest="visibility", action="store_const", const="private")
-    s.set_defaults(func=cmd_bucket_set)
-
-    s = bsub.add_parser("credentials", parents=[common], help="replace storage credentials (R2 keys / S3 role)")
-    s.add_argument("bucket")
+    s = command(bsub, "credentials", "replace storage credentials (R2 keys / S3 role)", cmd_bucket_credentials, bucket=True)
     s.add_argument("--access-key-id")
     s.add_argument("--role-arn")
     s.add_argument("--rotate-external-id", action="store_true")
-    s.set_defaults(func=cmd_bucket_credentials)
-
-    s = bsub.add_parser("verify", parents=[common], help="check storage access and that private storage is not public")
-    s.add_argument("bucket")
-    s.set_defaults(func=cmd_bucket_verify)
-
-    s = bsub.add_parser("rm", parents=[common], help="deregister (storage contents are not deleted)")
-    s.add_argument("bucket")
+    command(bsub, "verify", "check storage access and that private storage is not public", cmd_bucket_verify, bucket=True)
+    s = command(bsub, "rm", "deregister (storage contents are not deleted)", cmd_bucket_rm, bucket=True)
     s.add_argument("-y", "--yes", action="store_true")
-    s.set_defaults(func=cmd_bucket_rm)
 
-    a = sub.add_parser("acl", parents=[common], help="who may read a private bucket")
-    asub = a.add_subparsers(dest="acl_command", required=True, metavar="ACTION")
-    s = asub.add_parser("show", parents=[common], help="list entries")
-    s.add_argument("bucket")
-    s.set_defaults(func=cmd_acl_show)
+    asub = command(sub, "acl", "who may read a private bucket").add_subparsers(
+        dest="acl_command", required=True, metavar="ACTION"
+    )
+    command(asub, "show", "list entries", cmd_acl_show, bucket=True)
     for name, help_text in (("add", "grant read access"), ("rm", "revoke read access"), ("set", "replace all entries")):
-        s = asub.add_parser(name, parents=[common], help=help_text)
-        s.add_argument("bucket")
+        s = command(asub, name, help_text, cmd_acl_change, bucket=True)
         s.add_argument("--user", action="append", metavar="LOGIN")
         s.add_argument("--org", action="append", metavar="ORG")
         s.add_argument("--team", action="append", metavar="ORG/SLUG")
-        s.set_defaults(func=cmd_acl_change)
 
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    # Defaults for the global options are filled in here, not with set_defaults():
-    # argparse shares option objects between parsers built from the same parent.
-    args.registry = getattr(args, "registry", None)
-    args.json = getattr(args, "json", False)
     try:
         return int(args.func(args) or 0)
     except CliError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     except CarlaPackError as e:
-        message, code, _status = (list(e.args) + ["", "", 0])[:3]
-        hint = "; run `carla-pack login`" if code == "unauthenticated" else ""
-        print(f"error: {message}{hint}", file=sys.stderr)
-        return 1
+        print(f"error: {e.args[0]}", file=sys.stderr)
+        return 130 if e.args[1] == "interrupted" else 1
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130

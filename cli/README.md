@@ -22,7 +22,7 @@ carla-pack ls alice/maps                 # バケット内のファイル一覧
 carla-pack ls alice/maps Town10/         # プレフィックスで絞り込み
 carla-pack pull alice/maps maps/Town10HD_Opt.tar.zst -o ./packs
 carla-pack pull alice/maps maps/          # プレフィックス配下をすべて
-carla-pack pull alice/maps                # バケット全体
+carla-pack pull alice/maps                # バケット全体（-j で並列数、既定 4）
 ```
 
 バケットは `OWNER/NAME`、`NAME`（一意な場合）、またはバケット ID で指定します。

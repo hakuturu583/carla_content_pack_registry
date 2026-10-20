@@ -295,11 +295,12 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [authMode, githubClientId, oauthScopes]
+                required: [authMode, githubClientId, oauthScopes, loginHint]
                 properties:
                   authMode: { type: string, enum: [github, mock] }
                   githubClientId: { type: [string, 'null'] }
                   oauthScopes: { type: string, examples: ['read:org'] }
+                  loginHint: { type: [string, 'null'], description: How to log in when device login is unavailable }
   /login/github:
     get:
       operationId: startGithubLogin
