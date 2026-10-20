@@ -1,0 +1,30 @@
+# Local development: wrangler dev + local D1 + SeaweedFS + mock auth.
+# Secrets (CREDENTIAL_KEYS, optional GITHUB_CLIENT_*) go in deploy/cloudflare/.dev.vars
+# (generate with `node scripts/gen-dev-vars.mjs`). Never deploy this file.
+name = "ccpr-registry-local"
+main = "../../src/runtime/cloudflare.ts"
+compatibility_date = "2025-10-01"
+workers_dev = false
+
+[vars]
+ENVIRONMENT = "local"
+AUTH_MODE = "mock"
+PUBLIC_BASE_URL = "http://localhost:8787"
+LOCAL_S3_ENDPOINT = "http://127.0.0.1:8333"
+LOCAL_S3_PUBLIC_ENDPOINT = "http://localhost:8333"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "registry"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "../../migrations"
+
+[[ratelimits]]
+name = "RL_WRITE"
+namespace_id = "1001"
+simple = { limit = 30, period = 60 }
+
+[[ratelimits]]
+name = "RL_READ"
+namespace_id = "1002"
+simple = { limit = 120, period = 60 }

@@ -1,0 +1,23 @@
+{
+  "identities": [
+    {
+      "name": "seed-admin",
+      "credentials": [{ "accessKey": "LOCALSEEDADMIN0001", "secretKey": "local-seed-admin-secret-not-for-production" }],
+      "actions": ["Admin", "Read", "List", "Write", "Tagging"]
+    },
+    {
+      "name": "alice",
+      "credentials": [{ "accessKey": "LOCALALICEKEY00001", "secretKey": "local-alice-secret-not-for-production" }],
+      "actions": ["Read:alice-packs", "List:alice-packs", "Write:alice-packs", "Read:exposed-packs", "List:exposed-packs", "Write:exposed-packs"]
+    },
+    {
+      "name": "bob",
+      "credentials": [{ "accessKey": "LOCALBOBKEY0000001", "secretKey": "local-bob-secret-not-for-production" }],
+      "actions": ["Read:bob-packs", "List:bob-packs", "Write:bob-packs"]
+    },
+    {
+      "name": "anonymous",
+      "actions": ["Read:exposed-packs", "List:exposed-packs"]
+    }
+  ]
+}

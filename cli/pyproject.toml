@@ -1,0 +1,29 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "carla-pack"
+description = "Discover, share and download CARLA Content Packs from a carla-pack registry"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "UNLICENSED" }
+dynamic = ["version"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Rust",
+  "Environment :: Console",
+]
+
+[project.scripts]
+carla-pack = "carla_pack.cli:main"
+
+[tool.maturin]
+# Rust core compiled as carla_pack._core; Python sources in python/.
+features = ["python"]
+python-source = "python"
+module-name = "carla_pack._core"
+include = [{ path = "python/carla_pack/py.typed", format = "wheel" }]
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]

@@ -1,0 +1,7 @@
+extends:
+  - recommended
+rules:
+  info-license-strict: off        # license not chosen yet (UNLICENSED)
+  no-server-example.com: off
+  operation-4xx-response: off      # /health and OAuth redirects intentionally have none
+  operation-2xx-response: off      # OAuth endpoints answer with 302

@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - name: OpenAPI lint
+        run: npx --yes @redocly/cli@2.0.8 lint openapi/openapi.yaml
+      - name: Build Lambda bundle
+        run: npm run build:lambda
+      - name: Build Worker bundle (dry run)
+        env:
+          ENV: staging
+          HOSTNAME: registry-staging.example.org
+          ZONE_NAME: example.org
+          D1_DATABASE_ID: 00000000-0000-0000-0000-000000000000
+          D1_DATABASE_NAME: ci
+          GITHUB_CLIENT_ID: ci
+          WRANGLER_SEND_METRICS: "false"
+        run: |
+          node scripts/render-wrangler.mjs
+          npx wrangler deploy --dry-run --config deploy/cloudflare/wrangler.staging.generated.toml --outdir dist/worker
+
+  integration:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Start SeaweedFS and DynamoDB Local
+        run: docker compose -f local/docker-compose.yml --profile aws up -d --wait
+      - run: npm run dev:seed
+      - name: Integration tests (Worker entry + D1, Lambda handler + DynamoDB, real SeaweedFS)
+        run: npm run test:integration
+      - name: wrangler dev smoke test (workerd + local D1 + SeaweedFS)
+        env:
+          WRANGLER_SEND_METRICS: "false"
+        run: |
+          node scripts/gen-dev-vars.mjs
+          npm run db:migrate:local
+          npx wrangler dev --config deploy/cloudflare/wrangler.local.toml --port 8787 --ip 127.0.0.1 > wrangler.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:8787/health && break; sleep 1; done
+          curl -sf http://127.0.0.1:8787/health   # fail the job if the registry never came up
+          SMOKE_BASE_URL=http://localhost:8787 SMOKE_TOKEN=mock:alice SMOKE_LOCAL_FLOW=1 npm run smoke
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: carla-pack CLI end-to-end (against the wrangler dev registry started above)
+        working-directory: cli
+        env:
+          CARLA_PACK_TEST_REGISTRY: http://localhost:8787
+          CARLA_PACK_REQUIRE_REGISTRY: "1"   # fail instead of skipping if the registry is down
+        run: |
+          python -m venv .venv && . .venv/bin/activate
+          pip install "maturin>=1.9,<2" "pytest>=8"
+          maturin develop
+          pytest -v
+      - if: failure()
+        run: cat wrangler.log || true
+
+  cli:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --features python -- -D warnings
+      - run: cargo test
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build wheel and run offline CLI tests
+        run: |
+          python -m venv .venv && . .venv/bin/activate
+          pip install "maturin>=1.9,<2" "pytest>=8"
+          maturin build --release -o dist
+          pip install dist/*.whl
+          carla-pack --version
+          pytest -v   # registry-dependent tests skip here; they run in the integration job
+
+  terraform:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        stack: [infra/cloudflare, infra/aws, infra/aws/bootstrap]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.13.4
+      - run: terraform fmt -check -recursive
+        working-directory: ${{ matrix.stack }}
+      - name: Validate
+        working-directory: ${{ matrix.stack }}
+        run: |
+          mkdir -p ../../dist && touch ../../dist/lambda.zip
+          terraform init -backend=false -input=false
+          terraform validate
