@@ -307,4 +307,23 @@ fn pull_expands_prefixes_skips_existing_and_refuses_escaping_keys() {
 
     let escape = c.pull(BUCKET_ID, &["../etc/passwd".to_string()], dir.path(), true, 1, |_| {});
     assert!(matches!(escape, Err(Error::Usage(m)) if m.contains("outside")));
+
+    // Overlapping targets download each object once.
+    let events = Mutex::new(Vec::new());
+    let overlap = vec!["maps/".to_string(), "maps/a.tar".to_string(), "/maps/a.tar".to_string()];
+    c.pull(BUCKET_ID, &overlap, dir.path(), true, 4, |e| events.lock().unwrap().push(e)).unwrap();
+    assert_eq!(events.into_inner().unwrap().len(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn pull_refuses_to_write_through_symlinked_directories() {
+    let registry = MockServer::start();
+    let outside = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
+    let c = Client::new(&registry.base_url(), Some("t".into())).unwrap();
+    let r = c.pull(BUCKET_ID, &["link/file.tar".to_string()], dir.path(), true, 1, |_| {});
+    assert!(matches!(r, Err(Error::Usage(m)) if m.contains("symlinked")));
+    assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
 }

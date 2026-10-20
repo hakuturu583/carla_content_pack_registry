@@ -7,6 +7,9 @@ export const LIMITS = {
   nameMax: 64,
   descriptionMax: 1000,
   aclMaxEntries: 100,
+  /** Additions + removals per ACL update; keeps every backend's replacement atomic
+   *  (DynamoDB transactions hold 100 items, one of which is the bucket check). */
+  aclMaxChanges: 99,
   objectKeyMax: 1024,
   listLimitMax: 1000,
 } as const;

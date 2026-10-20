@@ -1,6 +1,7 @@
 //! HTTP client for the registry API (openapi/openapi.yaml), plus the workflows the CLI
 //! builds on it (bucket resolution, ACL edits, parallel pulls). Responses the CLI only
 //! displays are kept as `serde_json::Value`.
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, BufWriter, Write};
 use std::path::{Component, Path, PathBuf};
@@ -315,9 +316,16 @@ impl Client {
         if keys.is_empty() {
             return Err(Error::Usage("nothing to download".into()));
         }
-        // Map every key first so a hostile key fails before anything is written.
-        let work: Vec<(String, PathBuf)> =
-            keys.into_iter().map(|k| safe_dest(out_dir, &k).map(|d| (k, d))).collect::<Result<_>>()?;
+        // Map every key first so a hostile key fails before anything is written, and drop
+        // repeats (overlapping targets) so no two workers write the same file.
+        let mut seen = HashSet::new();
+        let mut work: Vec<(String, PathBuf)> = Vec::new();
+        for k in keys {
+            let dest = safe_dest(out_dir, &k)?;
+            if seen.insert(dest.clone()) {
+                work.push((k, dest));
+            }
+        }
 
         let next = AtomicUsize::new(0);
         let failed = AtomicBool::new(false);
@@ -328,6 +336,11 @@ impl Client {
                 s.spawn(|| {
                     while !failed.load(Ordering::Relaxed) {
                         let Some((key, dest)) = work.get(next.fetch_add(1, Ordering::Relaxed)) else { return };
+                        if let Err(e) = reject_symlinked_parents(out_dir, dest) {
+                            failed.store(true, Ordering::Relaxed);
+                            first_error.lock().unwrap().get_or_insert(e);
+                            return;
+                        }
                         if dest.exists() && !force {
                             on_event(PullEvent::Skipped { key: key.clone(), dest: dest.clone() });
                             continue;
@@ -403,6 +416,19 @@ pub fn safe_dest(out_dir: &Path, key: &str) -> Result<PathBuf> {
         }
     }
     if any { Ok(dest) } else { Err(escape()) }
+}
+
+/// Refuses to write through a symlinked directory between `out_dir` and `dest`
+/// (e.g. `out/link -> /home/user`), which the lexical check in `safe_dest` cannot see.
+fn reject_symlinked_parents(out_dir: &Path, dest: &Path) -> Result<()> {
+    let mut dir = dest.parent();
+    while let Some(d) = dir.filter(|d| *d != out_dir && d.starts_with(out_dir)) {
+        if fs::symlink_metadata(d).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(Error::Usage(format!("refusing to write through symlinked directory {}", d.display())));
+        }
+        dir = d.parent();
+    }
+    Ok(())
 }
 
 fn bucket_path(id: &str, suffix: &str) -> String {

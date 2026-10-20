@@ -27,6 +27,22 @@ variable "d1_location_hint" {
 }
 
 # --- WAF / bot protection -----------------------------------------------------
+# Cloudflare allows one zone-level entry-point ruleset per phase. When staging and
+# production share a zone, exactly one of their states must own these rules
+# (manage_zone_rules = true) and list every registry hostname in the zone.
+
+variable "manage_zone_rules" {
+  description = "This state owns the zone-level WAF/rate-limit rulesets and bot settings."
+  type        = bool
+  default     = true
+}
+
+variable "zone_rule_hostnames" {
+  description = "Hostnames the zone-level rules apply to (default: this environment's hostname)."
+  type        = list(string)
+  default     = []
+}
+
 # Defaults work on the Cloudflare Free plan (1 rate-limiting rule, 10 s period).
 
 variable "ratelimit_requests_per_period" {

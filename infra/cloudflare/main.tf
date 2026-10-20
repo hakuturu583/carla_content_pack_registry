@@ -1,5 +1,9 @@
 locals {
   name = "ccpr-${var.environment}"
+  # Zone-level rules cover every registry hostname in the zone (see manage_zone_rules).
+  zone_hosts     = length(var.zone_rule_hostnames) > 0 ? var.zone_rule_hostnames : [var.hostname]
+  host_condition = "http.host in {${join(" ", [for h in local.zone_hosts : "\"${h}\""])}}"
+  zone_rules     = var.manage_zone_rules ? 1 : 0
 }
 
 # --- D1 -----------------------------------------------------------------------
@@ -31,8 +35,9 @@ resource "cloudflare_dns_record" "registry" {
 # --- WAF: custom rules ------------------------------------------------------------
 
 resource "cloudflare_ruleset" "firewall_custom" {
+  count       = local.zone_rules
   zone_id     = var.zone_id
-  name        = "${local.name} custom firewall"
+  name        = "ccpr custom firewall"
   description = "Edge rules for the content pack registry"
   kind        = "zone"
   phase       = "http_request_firewall_custom"
@@ -40,13 +45,13 @@ resource "cloudflare_ruleset" "firewall_custom" {
   rules = [
     {
       description = "Development-only endpoints must never be reachable"
-      expression  = "(http.host eq \"${var.hostname}\" and starts_with(http.request.uri.path, \"/login/mock\"))"
+      expression  = "(${local.host_condition} and starts_with(http.request.uri.path, \"/login/mock\"))"
       action      = "block"
       enabled     = true
     },
     {
       description = "Only the methods the API uses"
-      expression  = "(http.host eq \"${var.hostname}\" and not http.request.method in {\"GET\" \"HEAD\" \"POST\" \"PUT\" \"PATCH\" \"DELETE\" \"OPTIONS\"})"
+      expression  = "(${local.host_condition} and not http.request.method in {\"GET\" \"HEAD\" \"POST\" \"PUT\" \"PATCH\" \"DELETE\" \"OPTIONS\"})"
       action      = "block"
       enabled     = true
     },
@@ -56,8 +61,9 @@ resource "cloudflare_ruleset" "firewall_custom" {
 # --- WAF: rate limiting (per client IP, per colo) ------------------------------------
 
 resource "cloudflare_ruleset" "ratelimit" {
+  count       = local.zone_rules
   zone_id     = var.zone_id
-  name        = "${local.name} rate limit"
+  name        = "ccpr rate limit"
   description = "Per-IP rate limit in front of the registry"
   kind        = "zone"
   phase       = "http_ratelimit"
@@ -65,7 +71,7 @@ resource "cloudflare_ruleset" "ratelimit" {
   rules = [
     {
       description = "Per-IP request rate"
-      expression  = "(http.host eq \"${var.hostname}\")"
+      expression  = "(${local.host_condition})"
       action      = "block"
       enabled     = true
       ratelimit = {
@@ -81,9 +87,9 @@ resource "cloudflare_ruleset" "ratelimit" {
 # --- WAF: managed rules (Pro+) --------------------------------------------------------
 
 resource "cloudflare_ruleset" "managed_waf" {
-  count       = var.enable_managed_waf ? 1 : 0
+  count       = var.manage_zone_rules && var.enable_managed_waf ? 1 : 0
   zone_id     = var.zone_id
-  name        = "${local.name} managed WAF"
+  name        = "ccpr managed WAF"
   description = "Cloudflare Managed Ruleset"
   kind        = "zone"
   phase       = "http_request_firewall_managed"
@@ -91,7 +97,7 @@ resource "cloudflare_ruleset" "managed_waf" {
   rules = [
     {
       description = "Cloudflare Managed Ruleset"
-      expression  = "(http.host eq \"${var.hostname}\")"
+      expression  = "(${local.host_condition})"
       action      = "execute"
       enabled     = true
       action_parameters = {
@@ -104,7 +110,7 @@ resource "cloudflare_ruleset" "managed_waf" {
 # --- Bots -----------------------------------------------------------------------
 
 resource "cloudflare_bot_management" "zone" {
-  count      = var.enable_bot_fight_mode ? 1 : 0
+  count      = var.manage_zone_rules && var.enable_bot_fight_mode ? 1 : 0
   zone_id    = var.zone_id
   fight_mode = true
 }

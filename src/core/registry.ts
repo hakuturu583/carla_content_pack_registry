@@ -352,6 +352,13 @@ export class RegistryCore {
     );
     const resolved = await Promise.all([...refs.values()].map((ref) => this.deps.identity.resolvePrincipal(viewer.token, ref)));
     const entries = [...new Map(resolved.map((p) => [`${p.type}:${p.id}`, p])).values()];
+    const key = (e: AclEntry) => `${e.type}:${e.id}`;
+    const before = new Set((await this.deps.repo.getAcl(id)).map(key));
+    const after = new Set(entries.map(key));
+    const changes = [...after].filter((k) => !before.has(k)).length + [...before].filter((k) => !after.has(k)).length;
+    if (changes > LIMITS.aclMaxChanges) {
+      throw badRequest(`at most ${LIMITS.aclMaxChanges} ACL additions and removals per update; apply the change in smaller steps`);
+    }
     await this.deps.repo.replaceAcl(id, entries);
     await this.audit(viewer, 'acl.update', id, 'ok', { entries: entries.map((e) => `${e.type}:${e.id}`) });
     return entries;

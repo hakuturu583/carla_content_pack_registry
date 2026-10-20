@@ -53,6 +53,7 @@ echo "k$(date +%Y%m):$(openssl rand -base64 32)"
 
 1. Cloudflare API トークン（アカウント: D1 Edit / Workers Scripts Edit、ゾーン: DNS Edit / Zone WAF Edit / Bot Management Edit）を作成し、GitHub Environment シークレット `CLOUDFLARE_API_TOKEN` に登録。変数 `CF_ACCOUNT_ID`、`CF_ZONE_NAME` も設定。
 2. `infra/cloudflare/envs/<env>.tfvars` を埋める。
+   staging と production が同じゾーンの場合、ゾーン単位の WAF・レート制限・Bot 設定（Cloudflare ではフェーズごとに 1 つ）は production の state だけが持ちます（`manage_zone_rules = true`、`zone_rule_hostnames` に両方のホスト名）。staging は `manage_zone_rules = false` なので、production を一度 apply するまで staging のホスト名には WAF ルールが掛かりません。
 3. `Deploy (Cloudflare)` ワークフローを実行（初回は D1 作成のため apply 後にデプロイが走ります）。
 4. Worker シークレットを登録（初回と変更時のみ。値は標準入力から入力し、シェル履歴に残さない）:
    ```bash

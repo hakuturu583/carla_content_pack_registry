@@ -129,13 +129,25 @@ export class DynamoRepository implements RegistryRepository {
 
     const ids = [...new Set(granted.flat().map((r) => String(r.PK).slice('BUCKET#'.length)))].filter((id) => !found.has(id));
     const chunks = Array.from({ length: Math.ceil(ids.length / 100) }, (_, i) => ids.slice(i * 100, i * 100 + 100));
-    const pages = await Promise.all(
-      chunks.map((chunk) =>
-        this.doc.send(new BatchGetCommand({ RequestItems: { [this.table]: { Keys: chunk.map((id) => ({ PK: bucketPk(id), SK: 'META' })) } } })),
-      ),
-    );
-    for (const r of pages) for (const it of (r.Responses?.[this.table] as Item[]) ?? []) found.set((it.data as Bucket).id, it.data as Bucket);
+    const pages = await Promise.all(chunks.map((chunk) => this.batchGet(chunk.map((id) => ({ PK: bucketPk(id), SK: 'META' })))));
+    for (const items of pages) for (const it of items) found.set((it.data as Bucket).id, it.data as Bucket);
     return [...found.values()];
+  }
+
+  /** BatchGetItem, retrying UnprocessedKeys (throttling) instead of silently dropping them. */
+  private async batchGet(keys: Record<string, unknown>[]): Promise<Item[]> {
+    const out: Item[] = [];
+    let pending = keys;
+    for (let attempt = 0; pending.length > 0; attempt++) {
+      if (attempt > 0) {
+        if (attempt > 5) throw new Error('DynamoDB BatchGetItem left keys unprocessed after retries');
+        await new Promise((r) => setTimeout(r, 50 * 2 ** attempt));
+      }
+      const r = await this.doc.send(new BatchGetCommand({ RequestItems: { [this.table]: { Keys: pending } } }));
+      out.push(...((r.Responses?.[this.table] as Item[]) ?? []));
+      pending = (r.UnprocessedKeys?.[this.table]?.Keys as Record<string, unknown>[] | undefined) ?? [];
+    }
+    return out;
   }
 
   async getAcl(bucketId: string): Promise<AclEntry[]> {
@@ -152,26 +164,28 @@ export class DynamoRepository implements RegistryRepository {
   async replaceAcl(bucketId: string, entries: AclEntry[]): Promise<void> {
     const pk = bucketPk(bucketId);
     const sk = (e: AclEntry) => `ACL#${e.type}#${e.id}`;
-    const existing = await this.getAcl(bucketId);
+    const existing = new Map((await this.getAcl(bucketId)).map((e) => [sk(e), e]));
     const nextKeys = new Set(entries.map(sk));
     const ops: NonNullable<ConstructorParameters<typeof TransactWriteCommand>[0]['TransactItems']> = [
       // Guard: the bucket must still exist.
       { ConditionCheck: { TableName: this.table, Key: { PK: pk, SK: 'META' }, ConditionExpression: 'attribute_exists(PK)' } },
-      ...existing
-        .filter((e) => !nextKeys.has(sk(e)))
-        .map((e) => ({ Delete: { TableName: this.table, Key: { PK: pk, SK: sk(e) } } })),
-      ...entries.map((e) => ({
-        Put: {
-          TableName: this.table,
-          Item: { PK: pk, SK: sk(e), GSI1PK: `PRINCIPAL#${e.type}#${e.id}`, GSI1SK: pk, type: 'acl', entry: e },
-        },
-      })),
+      ...[...existing.keys()]
+        .filter((k) => !nextKeys.has(k))
+        .map((k) => ({ Delete: { TableName: this.table, Key: { PK: pk, SK: k } } })),
+      // Only new entries or changed display names are written.
+      ...entries
+        .filter((e) => existing.get(sk(e))?.name !== e.name)
+        .map((e) => ({
+          Put: {
+            TableName: this.table,
+            Item: { PK: pk, SK: sk(e), GSI1PK: `PRINCIPAL#${e.type}#${e.id}`, GSI1SK: pk, type: 'acl', entry: e },
+          },
+        })),
     ];
-    // TransactWriteItems is limited to 100 operations; ACLs are capped at 100 entries,
-    // so worst case (100 removals + 100 additions) is split into consecutive transactions.
-    for (let i = 0; i < ops.length; i += 100) {
-      await this.doc.send(new TransactWriteCommand({ TransactItems: ops.slice(i, i + 100) }));
-    }
+    // One transaction keeps the replacement atomic. RegistryCore caps the number of
+    // changes per update (ACL_MAX_CHANGES) so this always fits in the 100-item limit.
+    if (ops.length > 100) throw new Error('ACL update exceeds one DynamoDB transaction');
+    await this.doc.send(new TransactWriteCommand({ TransactItems: ops }));
   }
 
   async putSession(s: Session): Promise<void> {
