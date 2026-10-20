@@ -1,7 +1,7 @@
 // Input validation for user-supplied bucket settings. Every value that ends up in a
 // hostname or URL is checked here, so there is no user-controlled endpoint (SSRF guard).
 import { badRequest } from './errors.ts';
-import type { StorageProviderKind, Visibility } from './types.ts';
+import type { AclRef, LocalConfig, R2Config, S3Config, StaticCredentials, Visibility } from './types.ts';
 
 export const LIMITS = {
   nameMax: 64,
@@ -12,13 +12,13 @@ export const LIMITS = {
 } as const;
 
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-const R2_ACCOUNT_RE = /^[0-9a-f]{32}$/;
-const R2_BUCKET_RE = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/;
-// S3 bucket names: dots are rejected so virtual-hosted TLS always works.
-const S3_BUCKET_RE = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/;
+// Exported so the storage layer re-checks with the same patterns before building a hostname.
+export const R2_ACCOUNT_RE = /^[0-9a-f]{32}$/;
+// R2 / S3 / local bucket names. Dots are rejected so S3 virtual-hosted TLS always works.
+export const BUCKET_RE = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/;
 // Commercial + GovCloud partitions (aws). China / ISO partitions are not supported.
-const AWS_REGION_RE = /^(us|eu|ap|sa|ca|me|af|il|mx)(-gov)?-(north|south|east|west|central|northeast|northwest|southeast|southwest)-[1-9]$/;
-const ROLE_ARN_RE = /^arn:aws:iam::(\d{12}):role\/[A-Za-z0-9+=,.@_/-]{1,512}$/;
+export const AWS_REGION_RE = /^(us|eu|ap|sa|ca|me|af|il|mx)(-gov)?-(north|south|east|west|central|northeast|northwest|southeast|southwest)-[1-9]$/;
+const ROLE_ARN_RE = /^arn:aws:iam::\d{12}:role\/[A-Za-z0-9+=,.@_/-]{1,512}$/;
 const ACCESS_KEY_RE = /^[A-Za-z0-9]{16,128}$/;
 const SECRET_KEY_RE = /^[A-Za-z0-9/+=_-]{16,128}$/;
 const LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
@@ -31,9 +31,9 @@ export function asObject(v: unknown, what = 'body'): Json {
   return v as Json;
 }
 
-function str(o: Json, key: string, required: true): string;
-function str(o: Json, key: string, required: false): string | undefined;
-function str(o: Json, key: string, required: boolean): string | undefined {
+export function readString(o: Json, key: string, required: true): string;
+export function readString(o: Json, key: string, required: false): string | undefined;
+export function readString(o: Json, key: string, required: boolean): string | undefined {
   const v = o[key];
   if (v === undefined || v === null) {
     if (required) throw badRequest(`${key} is required`);
@@ -62,52 +62,42 @@ export function validateVisibility(v: string): Visibility {
   return v;
 }
 
-export interface StorageInput {
-  provider: StorageProviderKind;
-  bucket: string;
-  accountId?: string;
-  region?: string;
-  roleArn?: string;
+/** Validated storage settings from the user. S3's externalId is added by the registry. */
+export type StorageInput = R2Config | Omit<S3Config, 'externalId'> | LocalConfig;
+
+export function validateRoleArn(v: string): string {
+  return check(v, ROLE_ARN_RE, 'storage.roleArn');
 }
 
 export function parseStorageInput(raw: unknown, allowLocal: boolean): StorageInput {
   const o = asObject(raw, 'storage');
-  const provider = str(o, 'provider', true);
-  const bucket = str(o, 'bucket', true);
+  const provider = readString(o, 'provider', true);
+  const bucket = check(readString(o, 'bucket', true), BUCKET_RE, 'storage.bucket');
   switch (provider) {
     case 'r2':
-      return {
-        provider,
-        bucket: check(bucket, R2_BUCKET_RE, 'storage.bucket'),
-        accountId: check(str(o, 'accountId', true), R2_ACCOUNT_RE, 'storage.accountId'),
-      };
+      return { provider, bucket, accountId: check(readString(o, 'accountId', true), R2_ACCOUNT_RE, 'storage.accountId') };
     case 's3':
       return {
         provider,
-        bucket: check(bucket, S3_BUCKET_RE, 'storage.bucket'),
-        region: check(str(o, 'region', true), AWS_REGION_RE, 'storage.region'),
-        roleArn: check(str(o, 'roleArn', true), ROLE_ARN_RE, 'storage.roleArn'),
+        bucket,
+        region: check(readString(o, 'region', true), AWS_REGION_RE, 'storage.region'),
+        roleArn: validateRoleArn(readString(o, 'roleArn', true)),
       };
     case 'local':
       if (!allowLocal) throw badRequest('storage.provider "local" is only available in local development');
-      return { provider, bucket: check(bucket, R2_BUCKET_RE, 'storage.bucket') };
+      return { provider, bucket };
     default:
       throw badRequest('storage.provider must be "r2" or "s3"');
   }
 }
 
-export function parseStaticCredentials(raw: unknown): { accessKeyId: string; secretAccessKey: string } {
+export function parseStaticCredentials(raw: unknown): StaticCredentials {
   const o = asObject(raw, 'credentials');
   return {
-    accessKeyId: check(str(o, 'accessKeyId', true), ACCESS_KEY_RE, 'credentials.accessKeyId'),
-    secretAccessKey: check(str(o, 'secretAccessKey', true), SECRET_KEY_RE, 'credentials.secretAccessKey'),
+    accessKeyId: check(readString(o, 'accessKeyId', true), ACCESS_KEY_RE, 'credentials.accessKeyId'),
+    secretAccessKey: check(readString(o, 'secretAccessKey', true), SECRET_KEY_RE, 'credentials.secretAccessKey'),
   };
 }
-
-export type AclRef =
-  | { type: 'user'; login: string }
-  | { type: 'org'; login: string }
-  | { type: 'team'; org: string; slug: string };
 
 export function parseAclInput(raw: unknown): AclRef[] {
   const o = asObject(raw);
@@ -116,15 +106,15 @@ export function parseAclInput(raw: unknown): AclRef[] {
   if (entries.length > LIMITS.aclMaxEntries) throw badRequest(`at most ${LIMITS.aclMaxEntries} ACL entries`);
   return entries.map((e, i) => {
     const eo = asObject(e, `entries[${i}]`);
-    const type = str(eo, 'type', true);
+    const type = readString(eo, 'type', true);
     if (type === 'user' || type === 'org') {
-      return { type, login: check(str(eo, 'login', true), LOGIN_RE, `entries[${i}].login`) };
+      return { type, login: check(readString(eo, 'login', true), LOGIN_RE, `entries[${i}].login`) };
     }
     if (type === 'team') {
       return {
         type,
-        org: check(str(eo, 'org', true), LOGIN_RE, `entries[${i}].org`),
-        slug: check(str(eo, 'slug', true).toLowerCase(), TEAM_SLUG_RE, `entries[${i}].slug`),
+        org: check(readString(eo, 'org', true), LOGIN_RE, `entries[${i}].org`),
+        slug: check(readString(eo, 'slug', true).toLowerCase(), TEAM_SLUG_RE, `entries[${i}].slug`),
       };
     }
     throw badRequest(`entries[${i}].type must be user, org or team`);
@@ -143,9 +133,3 @@ export function validatePrefix(prefix: string | undefined): string | undefined {
   if (prefix === undefined || prefix === '') return undefined;
   return validateObjectKey(prefix);
 }
-
-export function awsAccountFromRoleArn(arn: string): string | null {
-  return ROLE_ARN_RE.exec(arn)?.[1] ?? null;
-}
-
-export { str as readString };

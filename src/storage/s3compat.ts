@@ -2,6 +2,7 @@
 // Endpoints are derived from validated config only (see validation.ts) — never from user URLs.
 import { AwsClient } from 'aws4fetch';
 import { RegistryError, badRequest } from '../core/errors.ts';
+import { AWS_REGION_RE, BUCKET_RE, R2_ACCOUNT_RE } from '../core/validation.ts';
 import type {
   Clock,
   CredentialResolver,
@@ -12,7 +13,10 @@ import type {
   VerifyReport,
 } from '../core/ports.ts';
 import type { Bucket, ResolvedCredentials, StorageConfig } from '../core/types.ts';
+import { encodeKey } from '../util/s3key.ts';
 import { tagBlocks, tagText } from '../util/xml.ts';
+
+export { encodeKey };
 
 export interface Endpoint {
   /** Base URL of the bucket for server-side calls, without trailing slash. */
@@ -31,10 +35,6 @@ export interface LocalStorageSettings {
   publicEndpoint: string;
 }
 
-const R2_ACCOUNT_RE = /^[0-9a-f]{32}$/;
-const BUCKET_RE = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/;
-const REGION_RE = /^[a-z]{2}(-gov)?-[a-z]+-[1-9]$/;
-
 export function endpointFor(cfg: StorageConfig, local: LocalStorageSettings | null): Endpoint {
   // Re-validate here as well: this is the last line before a hostname is built.
   if (!BUCKET_RE.test(cfg.bucket)) throw badRequest('invalid bucket name');
@@ -45,7 +45,7 @@ export function endpointFor(cfg: StorageConfig, local: LocalStorageSettings | nu
       return { bucketUrl: `${svc}/${cfg.bucket}`, publicBucketUrl: `${svc}/${cfg.bucket}`, serviceUrl: `${svc}/`, region: 'auto' };
     }
     case 's3': {
-      if (!REGION_RE.test(cfg.region)) throw badRequest('invalid AWS region');
+      if (!AWS_REGION_RE.test(cfg.region)) throw badRequest('invalid AWS region');
       const b = `https://${cfg.bucket}.s3.${cfg.region}.amazonaws.com`;
       return { bucketUrl: b, publicBucketUrl: b, serviceUrl: `https://s3.${cfg.region}.amazonaws.com/`, region: cfg.region };
     }
@@ -59,14 +59,6 @@ export function endpointFor(cfg: StorageConfig, local: LocalStorageSettings | nu
       };
     }
   }
-}
-
-/** RFC 3986 encoding per path segment, keeping "/" separators. */
-export function encodeKey(key: string): string {
-  return key
-    .split('/')
-    .map((seg) => encodeURIComponent(seg).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`))
-    .join('/');
 }
 
 export class S3CompatibleStorage implements StorageProvider {
@@ -130,42 +122,31 @@ export class S3CompatibleStorage implements StorageProvider {
   async verify({ expectPrivate }: { expectPrivate: boolean }): Promise<VerifyReport> {
     const checks: VerifyReport['checks'] = [];
     const warnings: string[] = [];
+    const probe = async <T>(name: string, fn: () => Promise<T>): Promise<T | undefined> => {
+      try {
+        const v = await fn();
+        checks.push({ name, ok: true });
+        return v;
+      } catch (e) {
+        checks.push({ name, ok: false, detail: e instanceof Error ? e.message : String(e) });
+        return undefined;
+      }
+    };
+    // Anonymous requests must be rejected, otherwise the bucket ACL could be bypassed.
+    const anonymousDenied = async (name: string, url: string, method: string, what: string) => {
+      const res = await this.fetchImpl(url, { method }).catch(() => null);
+      const open = res?.status === 200;
+      checks.push({ name, ok: !open, detail: open ? `${what} publicly readable; disable public access` : undefined });
+    };
 
-    let sampleKey: string | null = null;
-    try {
-      const page = await this.list({ limit: 1 });
-      sampleKey = page.objects[0]?.key ?? null;
-      checks.push({ name: 'list_objects', ok: true });
-    } catch (e) {
-      checks.push({ name: 'list_objects', ok: false, detail: e instanceof Error ? e.message : String(e) });
-      return { ok: false, checks, warnings };
-    }
-
-    try {
-      await this.head(sampleKey ?? `.ccpr-verify-${this.clock.now()}`);
-      checks.push({ name: 'head_object', ok: true });
-    } catch (e) {
-      checks.push({ name: 'head_object', ok: false, detail: e instanceof Error ? e.message : String(e) });
-    }
+    const page = await probe('list_objects', () => this.list({ limit: 1 }));
+    if (!page) return { ok: false, checks, warnings };
+    const sampleKey = page.objects[0]?.key ?? null;
+    await probe('head_object', () => this.head(sampleKey ?? `.ccpr-verify-${this.clock.now()}`));
 
     if (expectPrivate) {
-      // Anonymous requests must be rejected, otherwise the bucket ACL could be bypassed.
-      const anonList = await this.fetchImpl(`${this.ep.bucketUrl}/?list-type=2&max-keys=1`).catch(() => null);
-      const listPublic = anonList?.status === 200;
-      checks.push({
-        name: 'anonymous_list_denied',
-        ok: !listPublic,
-        detail: listPublic ? 'bucket listing is publicly readable; disable public access' : undefined,
-      });
-      if (sampleKey) {
-        const anonGet = await this.fetchImpl(`${this.ep.bucketUrl}/${encodeKey(sampleKey)}`, { method: 'HEAD' }).catch(() => null);
-        const objPublic = anonGet?.status === 200;
-        checks.push({
-          name: 'anonymous_read_denied',
-          ok: !objPublic,
-          detail: objPublic ? 'objects are publicly readable; disable public access' : undefined,
-        });
-      }
+      await anonymousDenied('anonymous_list_denied', `${this.ep.bucketUrl}/?list-type=2&max-keys=1`, 'GET', 'bucket listing is');
+      if (sampleKey) await anonymousDenied('anonymous_read_denied', `${this.ep.bucketUrl}/${encodeKey(sampleKey)}`, 'HEAD', 'objects are');
       warnings.push(
         'The registry cannot detect public access through r2.dev, custom domains or CDNs in front of the bucket; keep those disabled for private buckets.',
       );

@@ -8,6 +8,8 @@ export interface RegistryConfig {
   environment: Environment;
   authMode: AuthMode;
   publicBaseUrl: string;
+  /** Path prefix of publicBaseUrl (e.g. "/staging" for an API Gateway stage URL), or "". */
+  basePath: string;
   github: { clientId: string; clientSecret: string } | null;
   credentialKeys: string;
   presignTtlSeconds: number;
@@ -70,6 +72,7 @@ export function loadConfig(env: RawEnv): RegistryConfig {
     environment,
     authMode,
     publicBaseUrl,
+    basePath: base.pathname.replace(/\/+$/, ''),
     github,
     credentialKeys: env.CREDENTIAL_KEYS,
     presignTtlSeconds: int(env.PRESIGN_TTL_SECONDS, 300, 30, PRESIGN_TTL_MAX, 'PRESIGN_TTL_SECONDS'),

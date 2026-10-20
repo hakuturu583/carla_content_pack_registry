@@ -1,8 +1,8 @@
 // GitHubIdentityProvider: OAuth App login, profile, and org/team membership checks.
 // Anything GitHub cannot positively confirm is treated as "no access".
 import { RegistryError, badRequest, unauthenticated } from '../core/errors.ts';
-import type { IdentityProfile, IdentityProvider, ResolvedPrincipal } from '../core/ports.ts';
-import type { Memberships } from '../core/types.ts';
+import type { IdentityProfile, IdentityProvider } from '../core/ports.ts';
+import type { AclEntry, AclRef, Memberships } from '../core/types.ts';
 
 const API = 'https://api.github.com';
 const MAX_PAGES = 10; // 1000 orgs/teams; truncation can only cause denials, never grants
@@ -17,8 +17,6 @@ export interface GitHubOAuthConfig {
 export const OAUTH_SCOPES = 'read:org';
 
 export class GitHubIdentityProvider implements IdentityProvider {
-  readonly kind = 'github' as const;
-
   constructor(
     private readonly userAgent: string,
     private readonly fetchImpl: typeof fetch = (...a) => fetch(...a),
@@ -85,10 +83,7 @@ export class GitHubIdentityProvider implements IdentityProvider {
     };
   }
 
-  async resolvePrincipal(
-    token: string,
-    ref: { type: 'user'; login: string } | { type: 'org'; login: string } | { type: 'team'; org: string; slug: string },
-  ): Promise<ResolvedPrincipal> {
+  async resolvePrincipal(token: string, ref: AclRef): Promise<AclEntry> {
     const path =
       ref.type === 'user'
         ? `/users/${encodeURIComponent(ref.login)}`

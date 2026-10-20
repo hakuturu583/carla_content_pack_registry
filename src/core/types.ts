@@ -64,6 +64,12 @@ export interface Bucket {
 
 export type PrincipalType = 'user' | 'org' | 'team';
 
+/** ACL entry as written by an owner (GitHub names, resolved to IDs before storing). */
+export type AclRef =
+  | { type: 'user'; login: string }
+  | { type: 'org'; login: string }
+  | { type: 'team'; org: string; slug: string };
+
 export interface AclEntry {
   type: PrincipalType;
   /** GitHub numeric ID of the user / org / team. */

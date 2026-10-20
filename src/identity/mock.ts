@@ -1,8 +1,8 @@
 // Development-only identity provider. The runtime refuses to start it outside
 // ENVIRONMENT=local (see runtime/config.ts). Tokens look like "mock:<login>".
 import { badRequest, unauthenticated } from '../core/errors.ts';
-import type { IdentityProfile, IdentityProvider, ResolvedPrincipal } from '../core/ports.ts';
-import type { Memberships } from '../core/types.ts';
+import type { IdentityProfile, IdentityProvider } from '../core/ports.ts';
+import type { AclEntry, AclRef, Memberships } from '../core/types.ts';
 
 interface MockUser extends IdentityProfile {
   orgIds: number[];
@@ -31,8 +31,6 @@ export const MOCK_USERS: MockUser[] = [
 ];
 
 export class MockIdentityProvider implements IdentityProvider {
-  readonly kind = 'mock' as const;
-
   private user(token: string): MockUser {
     const login = token.startsWith('mock:') ? token.slice(5) : '';
     const u = MOCK_USERS.find((x) => x.login === login);
@@ -50,10 +48,7 @@ export class MockIdentityProvider implements IdentityProvider {
     return { orgIds: [...u.orgIds], teamIds: [...u.teamIds] };
   }
 
-  async resolvePrincipal(
-    _token: string,
-    ref: { type: 'user'; login: string } | { type: 'org'; login: string } | { type: 'team'; org: string; slug: string },
-  ): Promise<ResolvedPrincipal> {
+  async resolvePrincipal(_token: string, ref: AclRef): Promise<AclEntry> {
     if (ref.type === 'user') {
       const u = MOCK_USERS.find((x) => x.login === ref.login);
       if (u) return { type: 'user', id: u.id, name: u.login };

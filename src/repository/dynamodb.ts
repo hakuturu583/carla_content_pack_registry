@@ -112,41 +112,30 @@ export class DynamoRepository implements RegistryRepository {
   }
 
   async listCandidateBuckets(ownerId: GitHubId, principals: PrincipalRef[]): Promise<Bucket[]> {
-    const found = new Map<string, Bucket>();
-    const owned = await this.queryAll({
-      IndexName: 'GSI1',
-      KeyConditionExpression: 'GSI1PK = :pk',
-      ExpressionAttributeValues: { ':pk': `OWNER#${ownerId}` },
-    });
-    const pub = await this.queryAll({
-      IndexName: 'GSI2',
-      KeyConditionExpression: 'GSI2PK = :pk',
-      ExpressionAttributeValues: { ':pk': 'PUBLIC' },
-    });
-    for (const it of [...owned, ...pub]) found.set((it.data as Bucket).id, it.data as Bucket);
-
-    const granted = new Set<string>();
-    for (const p of principals) {
-      const rows = await this.queryAll({
-        IndexName: 'GSI1',
-        KeyConditionExpression: 'GSI1PK = :pk',
-        ExpressionAttributeValues: { ':pk': `PRINCIPAL#${p.type}#${p.id}` },
+    const byIndex = (index: 'GSI1' | 'GSI2', pk: string) =>
+      this.queryAll({
+        IndexName: index,
+        KeyConditionExpression: `${index}PK = :pk`,
+        ExpressionAttributeValues: { ':pk': pk },
       });
-      for (const r of rows) {
-        const id = String(r.PK).slice('BUCKET#'.length);
-        if (!found.has(id)) granted.add(id);
-      }
-    }
-    const ids = [...granted];
-    for (let i = 0; i < ids.length; i += 100) {
-      const r = await this.doc.send(
-        new BatchGetCommand({
-          RequestItems: { [this.table]: { Keys: ids.slice(i, i + 100).map((id) => ({ PK: bucketPk(id), SK: 'META' })) } },
-        }),
-      );
-      for (const it of (r.Responses?.[this.table] as Item[]) ?? []) found.set((it.data as Bucket).id, it.data as Bucket);
-    }
-    return [...found.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    // Owned, public and per-principal ACL lookups are independent: run them together.
+    const [owned, pub, ...granted] = await Promise.all([
+      byIndex('GSI1', `OWNER#${ownerId}`),
+      byIndex('GSI2', 'PUBLIC'),
+      ...principals.map((p) => byIndex('GSI1', `PRINCIPAL#${p.type}#${p.id}`)),
+    ]);
+    const found = new Map<string, Bucket>();
+    for (const it of [...owned!, ...pub!]) found.set((it.data as Bucket).id, it.data as Bucket);
+
+    const ids = [...new Set(granted.flat().map((r) => String(r.PK).slice('BUCKET#'.length)))].filter((id) => !found.has(id));
+    const chunks = Array.from({ length: Math.ceil(ids.length / 100) }, (_, i) => ids.slice(i * 100, i * 100 + 100));
+    const pages = await Promise.all(
+      chunks.map((chunk) =>
+        this.doc.send(new BatchGetCommand({ RequestItems: { [this.table]: { Keys: chunk.map((id) => ({ PK: bucketPk(id), SK: 'META' })) } } })),
+      ),
+    );
+    for (const r of pages) for (const it of (r.Responses?.[this.table] as Item[]) ?? []) found.set((it.data as Bucket).id, it.data as Bucket);
+    return [...found.values()];
   }
 
   async getAcl(bucketId: string): Promise<AclEntry[]> {

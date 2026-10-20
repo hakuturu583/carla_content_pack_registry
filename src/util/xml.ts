@@ -1,7 +1,7 @@
 // Minimal XML helpers for the small, well-known S3/STS response documents.
 // Workers have no DOMParser, and pulling a full XML parser in is unnecessary here.
 
-export function decodeEntities(s: string): string {
+function decodeEntities(s: string): string {
   return s.replace(/&(#x[0-9a-fA-F]+|#\d+|amp|lt|gt|quot|apos);/g, (_, e: string) => {
     switch (e) {
       case 'amp':

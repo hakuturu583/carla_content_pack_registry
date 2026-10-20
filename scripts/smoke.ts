@@ -5,7 +5,7 @@
 //
 // SMOKE_LOCAL_FLOW=1 registers a SeaweedFS bucket with alice's local keys, verifies it,
 // and downloads through a presigned URL (local only). Otherwise the script is read-only.
-export {};
+import { LOCAL_KEYS } from './local-fixtures.ts';
 const base = (process.env.SMOKE_BASE_URL ?? 'http://localhost:8787').replace(/\/+$/, '');
 const token = process.env.SMOKE_TOKEN;
 const bucketId = process.env.SMOKE_BUCKET_ID;
@@ -60,7 +60,7 @@ if (token) {
       name: `smoke-${Date.now()}`,
       visibility: 'private',
       storage: { provider: 'local', bucket: 'alice-packs' },
-      credentials: { accessKeyId: 'LOCALALICEKEY00001', secretAccessKey: 'local-alice-secret-not-for-production' },
+      credentials: LOCAL_KEYS.alice,
     });
     check('register bucket', reg.status === 201, `status ${reg.status}`);
     if (reg.status === 201) {

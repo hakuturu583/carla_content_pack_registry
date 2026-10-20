@@ -5,20 +5,20 @@
 import { AwsClient } from 'aws4fetch';
 import { RegistryError } from '../core/errors.ts';
 import type { Clock, CredentialResolver } from '../core/ports.ts';
-import type { Bucket, ResolvedCredentials, S3Config } from '../core/types.ts';
+import type { Bucket, ResolvedCredentials, S3Config, StaticCredentials } from '../core/types.ts';
 import type { Keyring } from '../util/crypto.ts';
 import { tagText } from '../util/xml.ts';
 
 export interface RegistryAwsIdentity {
   /** Credentials of the registry's own IAM principal (IAM user on Cloudflare, Lambda role on AWS). */
-  credentials: () => { accessKeyId: string; secretAccessKey: string; sessionToken?: string } | null;
+  credentials: () => (StaticCredentials & { sessionToken?: string }) | null;
   stsRegion: string;
 }
 
 const STS_DURATION_SECONDS = 900; // STS minimum; presigned URLs live <= 5 minutes.
 const REFRESH_MARGIN_MS = 6 * 60 * 1000; // never hand out creds that expire before a presigned URL would
 
-export function readOnlySessionPolicy(bucket: string): string {
+function readOnlySessionPolicy(bucket: string): string {
   return JSON.stringify({
     Version: '2012-10-17',
     Statement: [
@@ -29,7 +29,8 @@ export function readOnlySessionPolicy(bucket: string): string {
 }
 
 export class DefaultCredentialResolver implements CredentialResolver {
-  private readonly stsCache = new Map<string, ResolvedCredentials>();
+  // In-flight and resolved AssumeRole calls, so concurrent requests share one STS call.
+  private readonly stsCache = new Map<string, Promise<ResolvedCredentials>>();
 
   constructor(
     private readonly keyring: Keyring,
@@ -42,14 +43,14 @@ export class DefaultCredentialResolver implements CredentialResolver {
     return `bucket:${bucketId}|provider:${provider}`;
   }
 
-  async seal(bucketId: string, provider: string, plaintext: { accessKeyId: string; secretAccessKey: string }): Promise<string> {
+  async seal(bucketId: string, provider: string, plaintext: StaticCredentials): Promise<string> {
     return this.keyring.encrypt('storage-credentials', this.aad(bucketId, provider), JSON.stringify(plaintext));
   }
 
   async resolve(bucket: Bucket): Promise<ResolvedCredentials> {
     if (bucket.storage.provider === 's3') return this.assumeRole(bucket.id, bucket.storage);
     if (!bucket.credentialCiphertext) throw new RegistryError('storage_error', 'Bucket has no credentials configured');
-    let parsed: { accessKeyId: string; secretAccessKey: string };
+    let parsed: StaticCredentials;
     try {
       parsed = JSON.parse(
         await this.keyring.decrypt('storage-credentials', this.aad(bucket.id, bucket.storage.provider), bucket.credentialCiphertext),
@@ -62,9 +63,20 @@ export class DefaultCredentialResolver implements CredentialResolver {
 
   private async assumeRole(bucketId: string, cfg: S3Config): Promise<ResolvedCredentials> {
     const cacheKey = `${bucketId}|${cfg.roleArn}|${cfg.externalId}`;
-    const hit = this.stsCache.get(cacheKey);
-    if (hit?.expiresAt && hit.expiresAt - REFRESH_MARGIN_MS > this.clock.now()) return hit;
+    const pending = this.stsCache.get(cacheKey);
+    if (pending) {
+      const hit = await pending.catch(() => null);
+      if (hit?.expiresAt && hit.expiresAt - REFRESH_MARGIN_MS > this.clock.now()) return hit;
+    }
+    const call = this.callAssumeRole(bucketId, cfg);
+    this.stsCache.set(cacheKey, call);
+    call.catch(() => {
+      if (this.stsCache.get(cacheKey) === call) this.stsCache.delete(cacheKey);
+    });
+    return call;
+  }
 
+  private async callAssumeRole(bucketId: string, cfg: S3Config): Promise<ResolvedCredentials> {
     const own = this.aws?.credentials();
     if (!this.aws || !own) throw new RegistryError('misconfigured', 'Registry AWS principal is not configured');
     const client = new AwsClient({ ...own, service: 'sts', region: this.aws.stsRegion });
@@ -97,7 +109,6 @@ export class DefaultCredentialResolver implements CredentialResolver {
     if (!creds.accessKeyId || !creds.secretAccessKey || !creds.sessionToken || Number.isNaN(creds.expiresAt)) {
       throw new RegistryError('storage_error', 'AssumeRole returned an unexpected response');
     }
-    this.stsCache.set(cacheKey, creds);
     return creds;
   }
 }

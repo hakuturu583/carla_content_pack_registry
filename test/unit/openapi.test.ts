@@ -24,7 +24,7 @@ function appOperations(): Set<string> {
   const ops = new Set<string>();
   for (const r of app.routes) {
     if (r.method === 'ALL' || ['/', '/app.js', '/login/mock'].includes(r.path)) continue;
-    const path = r.path.replace(/:(\w+)/g, '{$1}').replace('/objects/*', '/objects/{key}/download');
+    const path = r.path.replace(/:(\w+)(\{[^}]*\})?/g, '{$1}');
     ops.add(`${r.method} ${path}`);
   }
   return ops;

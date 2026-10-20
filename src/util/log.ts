@@ -2,7 +2,7 @@
 // a careless log call cannot leak credentials, tokens or cookies.
 const SENSITIVE = /secret|token|password|authorization|cookie|credential|ciphertext|signature/i;
 
-export function redact(v: unknown, depth = 0): unknown {
+function redact(v: unknown, depth = 0): unknown {
   if (depth > 5 || v === null || typeof v !== 'object') return v;
   if (Array.isArray(v)) return v.map((x) => redact(x, depth + 1));
   const out: Record<string, unknown> = {};

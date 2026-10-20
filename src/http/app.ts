@@ -3,7 +3,7 @@
 import { Hono, type Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { getCookie } from 'hono/cookie';
-import { RegistryError, badRequest, unauthenticated } from '../core/errors.ts';
+import { RegistryError, badRequest, notFound, unauthenticated } from '../core/errors.ts';
 import type { Viewer } from '../core/registry.ts';
 import type { Session } from '../core/types.ts';
 import { MOCK_USERS } from '../identity/mock.ts';
@@ -35,14 +35,9 @@ async function jsonBody(c: Context): Promise<unknown> {
   }
 }
 
-/** Path prefix of PUBLIC_BASE_URL (e.g. "/staging" for an API Gateway stage URL), or "". */
-function basePath(s: Services): string {
-  return new URL(s.config.publicBaseUrl).pathname.replace(/\/+$/, '');
-}
-
 function bucketId(c: Context): string {
   const id = c.req.param('id') ?? '';
-  if (!BUCKET_ID_RE.test(id)) throw new RegistryError('not_found', 'Bucket not found');
+  if (!BUCKET_ID_RE.test(id)) throw notFound('Bucket not found');
   return id;
 }
 
@@ -98,14 +93,14 @@ export function createApp(getServices: ServicesProvider): Hono<Env> {
       'content-security-policy',
       "default-src 'none'; script-src 'self'; connect-src 'self'; img-src 'self' https://avatars.githubusercontent.com; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
     );
-    return c.html(indexHtml(basePath(c.get('services'))));
+    return c.html(indexHtml(c.get('services').config.basePath));
   });
   app.get('/app.js', (c) => c.body(APP_JS, 200, { 'content-type': 'text/javascript; charset=utf-8' }));
 
   app.get('/login/github', async (c) => {
     const s = c.get('services');
     if (s.config.authMode === 'mock') {
-      const links = MOCK_USERS.map((u) => `<li><a href="${basePath(s)}/login/mock?user=${u.login}">${u.login}</a></li>`).join('');
+      const links = MOCK_USERS.map((u) => `<li><a href="${s.config.basePath}/login/mock?user=${u.login}">${u.login}</a></li>`).join('');
       return c.html(`<!doctype html><title>Mock login</title><p>Development mock login (ENVIRONMENT=local only):</p><ul>${links}</ul>`);
     }
     const { location, cookie } = await s.auth.startLogin(c.req.query('redirect_to'));
@@ -120,16 +115,16 @@ export function createApp(getServices: ServicesProvider): Hono<Env> {
       getCookie(c, s.auth.stateCookie),
     );
     for (const ck of r.cookies) c.header('set-cookie', ck, { append: true });
-    return c.redirect(`${basePath(s)}${r.redirect}`, 302);
+    return c.redirect(`${s.config.basePath}${r.redirect}`, 302);
   });
 
   app.get('/login/mock', async (c) => {
     const s = c.get('services');
     // Defense in depth: loadConfig already refuses mock mode outside local.
-    if (s.config.authMode !== 'mock' || s.config.environment !== 'local') throw new RegistryError('not_found', 'Not found');
+    if (s.config.authMode !== 'mock' || s.config.environment !== 'local') throw notFound();
     const login = c.req.query('user') ?? '';
     c.header('set-cookie', await s.auth.createSession(`mock:${login}`));
-    return c.redirect(`${basePath(s)}/`, 302);
+    return c.redirect(`${s.config.basePath}/`, 302);
   });
 
   // ---------------------------------------------------------------------------
@@ -226,23 +221,10 @@ export function createApp(getServices: ServicesProvider): Hono<Env> {
     );
   });
 
-  // Keys may contain "/". Clients should percent-encode the key as one segment
-  // (a/b.tar -> a%2Fb.tar); literal slashes are accepted too.
-  app.get('/v1/buckets/:id/objects/*', async (c) => {
-    const id = bucketId(c);
-    const path = new URL(c.req.url).pathname;
-    const prefix = `/v1/buckets/${id}/objects/`;
-    const suffix = '/download';
-    if (!path.startsWith(prefix) || !path.endsWith(suffix) || path.length <= prefix.length + suffix.length) {
-      throw new RegistryError('not_found', 'Not found');
-    }
-    let key: string;
-    try {
-      key = decodeURIComponent(path.slice(prefix.length, -suffix.length));
-    } catch {
-      throw badRequest('Object key is not valid percent-encoding');
-    }
-    const url = await c.get('services').core.download(c.get('viewer'), id, key);
+  // Keys may contain "/": either percent-encode each segment (a/b c.tar -> a/b%20c.tar)
+  // or the whole key as one segment (a%2Fb%20c.tar).
+  app.get('/v1/buckets/:id/objects/:key{.+}/download', async (c) => {
+    const url = await c.get('services').core.download(c.get('viewer'), bucketId(c), c.req.param('key'));
     if (c.req.query('redirect') === '1') return c.redirect(url.url, 302);
     return c.json(url);
   });

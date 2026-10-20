@@ -21,17 +21,19 @@ export function b64urlDecode(s: string): Uint8Array<ArrayBuffer> {
   return out;
 }
 
-function b64Decode(s: string): Uint8Array<ArrayBuffer> {
-  return b64urlDecode(s.replace(/\+/g, '-').replace(/\//g, '_'));
-}
+/** Accepts standard base64 as well (the keyring config uses it). */
+const b64Decode = (s: string) => b64urlDecode(s.replace(/=+$/, ''));
 
 export function randomToken(bytes = 32): string {
   return b64urlEncode(crypto.getRandomValues(new Uint8Array(bytes)));
 }
 
+export async function sha256(input: string): Promise<Uint8Array> {
+  return new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(input)));
+}
+
 export async function sha256Hex(input: string): Promise<string> {
-  const d = new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(input)));
-  return [...d].map((b) => b.toString(16).padStart(2, '0')).join('');
+  return [...(await sha256(input))].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 export function timingSafeEqual(a: string, b: string): boolean {

@@ -2,12 +2,11 @@
 // It checks *which* access key signed a request (bucket isolation, anonymous access)
 // but not the signature itself — real SigV4 is covered by the SeaweedFS integration tests.
 
+import { LOCAL_BUCKETS, LOCAL_KEYS } from '../../scripts/local-fixtures.ts';
+
 export const FAKE_S3_ENDPOINT = 'http://fake-s3.test';
 
-export const LOCAL_KEYS = {
-  alice: { accessKeyId: 'LOCALALICEKEY00001', secretAccessKey: 'local-alice-secret-not-for-production' },
-  bob: { accessKeyId: 'LOCALBOBKEY0000001', secretAccessKey: 'local-bob-secret-not-for-production' },
-};
+export { LOCAL_KEYS };
 
 interface FakeBucket {
   keys: string[]; // access keys allowed to read/list
@@ -16,25 +15,12 @@ interface FakeBucket {
 }
 
 export function seededBuckets(): Map<string, FakeBucket> {
-  return new Map<string, FakeBucket>([
-    [
-      'alice-packs',
-      {
-        keys: [LOCAL_KEYS.alice.accessKeyId],
-        anonymous: false,
-        objects: new Map([
-          ['maps/Town10HD_Opt.tar.zst', 'fake map pack: Town10HD_Opt\n'],
-          ['maps/readme.md', '# Alice maps\n'],
-          ['vehicles/sedan with space.tar.zst', 'fake vehicle pack\n'],
-        ]),
-      },
-    ],
-    ['bob-packs', { keys: [LOCAL_KEYS.bob.accessKeyId], anonymous: false, objects: new Map([['props/cones.tar.zst', 'fake prop pack\n']]) }],
-    [
-      'exposed-packs',
-      { keys: [LOCAL_KEYS.alice.accessKeyId], anonymous: true, objects: new Map([['leak.txt', 'this bucket is publicly readable\n']]) },
-    ],
-  ]);
+  return new Map(
+    Object.entries(LOCAL_BUCKETS).map(([name, b]) => [
+      name,
+      { keys: [LOCAL_KEYS[b.owner].accessKeyId], anonymous: b.anonymous, objects: new Map(Object.entries(b.objects)) },
+    ]),
+  );
 }
 
 const xmlEsc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');

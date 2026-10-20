@@ -33,7 +33,7 @@ describe('endpointFor (SSRF guard)', () => {
 
   it('validates S3 role ARNs and regions', () => {
     const ok = { provider: 's3', bucket: 'packs', region: 'ap-northeast-1', roleArn: 'arn:aws:iam::123456789012:role/ccpr-read' };
-    expect(parseStorageInput(ok, false).roleArn).toBe(ok.roleArn);
+    expect(parseStorageInput(ok, false)).toEqual(ok);
     expect(() => parseStorageInput({ ...ok, roleArn: 'arn:aws:iam::1234:role/x' }, false)).toThrow();
     expect(() => parseStorageInput({ ...ok, region: 'cn-north-1' }, false)).toThrow();
     expect(() => parseStorageInput({ ...ok, bucket: 'has.dots' }, false)).toThrow();

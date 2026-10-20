@@ -1,6 +1,6 @@
 // Composition root shared by all runtimes. Platform adapters (repository, rate
 // limiter, registry AWS identity) are injected by runtime/cloudflare.ts or runtime/aws.ts.
-import { type Clock, type RateLimiter, type RegistryRepository, systemClock } from '../core/ports.ts';
+import { type Clock, type IdentityProvider, type RateLimiter, type RegistryRepository, systemClock } from '../core/ports.ts';
 import { RegistryCore } from '../core/registry.ts';
 import { DefaultCredentialResolver, type RegistryAwsIdentity } from '../credentials/resolver.ts';
 import { AuthService } from '../http/auth.ts';
@@ -18,6 +18,8 @@ export interface PlatformAdapters {
   awsIdentity: RegistryAwsIdentity['credentials'];
   fetchImpl?: typeof fetch;
   clock?: Clock;
+  /** Overrides the provider chosen by AUTH_MODE (tests). */
+  identity?: IdentityProvider;
 }
 
 export interface Services {
@@ -25,14 +27,14 @@ export interface Services {
   runtime: PlatformAdapters['runtime'];
   core: RegistryCore;
   auth: AuthService;
-  repo: RegistryRepository;
 }
 
 export function buildServices(config: RegistryConfig, p: PlatformAdapters): Services {
   const clock = p.clock ?? systemClock;
   const keyring = Keyring.parse(config.credentialKeys);
   const identity =
-    config.authMode === 'mock' ? new MockIdentityProvider() : new GitHubIdentityProvider('carla-content-pack-registry', p.fetchImpl);
+    p.identity ??
+    (config.authMode === 'mock' ? new MockIdentityProvider() : new GitHubIdentityProvider('carla-content-pack-registry', p.fetchImpl));
   const oauth = config.github
     ? new GitHubOAuth({ ...config.github, redirectUri: `${config.publicBaseUrl}/login/github/callback` }, p.fetchImpl)
     : null;
@@ -71,5 +73,5 @@ export function buildServices(config: RegistryConfig, p: PlatformAdapters): Serv
     secureCookies: new URL(config.publicBaseUrl).protocol === 'https:',
     publicOrigin: new URL(config.publicBaseUrl).origin,
   });
-  return { config, runtime: p.runtime, core, auth, repo: p.repo };
+  return { config, runtime: p.runtime, core, auth };
 }

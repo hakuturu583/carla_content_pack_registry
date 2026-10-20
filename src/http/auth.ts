@@ -5,7 +5,7 @@ import type { Clock, IdentityProvider, RegistryRepository } from '../core/ports.
 import type { Viewer } from '../core/registry.ts';
 import type { Session } from '../core/types.ts';
 import type { GitHubOAuth } from '../identity/github.ts';
-import { type Keyring, b64urlEncode, randomToken, sha256Hex, timingSafeEqual } from '../util/crypto.ts';
+import { type Keyring, b64urlDecode, b64urlEncode, randomToken, sha256, sha256Hex, timingSafeEqual } from '../util/crypto.ts';
 
 export interface AuthDeps {
   repo: RegistryRepository;
@@ -22,7 +22,6 @@ export interface CookieSpec {
   name: string;
   value: string;
   maxAge: number;
-  path?: string;
 }
 
 export interface AuthResult {
@@ -44,10 +43,10 @@ export class AuthService {
     this.stateCookie = d.secureCookies ? '__Host-ccpr_oauth' : 'ccpr_oauth';
   }
 
-  cookieHeader(c: CookieSpec): string {
+  private cookieHeader(c: CookieSpec): string {
     return [
       `${c.name}=${c.value}`,
-      `Path=${c.path ?? '/'}`,
+      'Path=/',
       `Max-Age=${c.maxAge}`,
       'HttpOnly',
       'SameSite=Lax',
@@ -61,7 +60,7 @@ export class AuthService {
     if (!this.d.oauth) throw new RegistryError('not_found', 'GitHub login is not enabled');
     const state = randomToken(24);
     const verifier = randomToken(32);
-    const challenge = b64urlEncode(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))));
+    const challenge = b64urlEncode(await sha256(verifier));
     const payload = b64urlEncode(new TextEncoder().encode(JSON.stringify({ state, verifier, redirect: safeRedirect(redirectTo) })));
     return {
       location: this.d.oauth.authorizeUrl(state, challenge),
@@ -168,6 +167,5 @@ export function safeRedirect(r: string | undefined): string {
 
 function b64urlDecodeSafe(s: string): Uint8Array {
   if (!/^[A-Za-z0-9_-]{1,4096}$/.test(s)) throw new Error('bad cookie');
-  const b64 = s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4);
-  return Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
+  return b64urlDecode(s);
 }

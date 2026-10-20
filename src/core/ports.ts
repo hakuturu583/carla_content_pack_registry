@@ -1,11 +1,13 @@
 // Ports (interfaces) that isolate RegistryCore from Cloudflare/AWS/GitHub specifics.
 import type {
   AclEntry,
+  AclRef,
   AuditEvent,
   Bucket,
   GitHubId,
   Memberships,
   ResolvedCredentials,
+  StaticCredentials,
   Session,
   StorageConfig,
   User,
@@ -15,10 +17,7 @@ import type {
 // Persistence
 // ---------------------------------------------------------------------------
 
-export interface PrincipalRef {
-  type: 'user' | 'org' | 'team';
-  id: GitHubId;
-}
+export type PrincipalRef = Pick<AclEntry, 'type' | 'id'>;
 
 export interface RegistryRepository {
   upsertUser(user: Omit<User, 'createdAt' | 'updatedAt'>): Promise<User>;
@@ -60,23 +59,13 @@ export interface IdentityProfile {
   avatarUrl: string | null;
 }
 
-export interface ResolvedPrincipal {
-  type: 'user' | 'org' | 'team';
-  id: GitHubId;
-  name: string;
-}
-
 export interface IdentityProvider {
-  readonly kind: 'github' | 'mock';
   /** Profile for an access token. Throws RegistryError('unauthenticated') when invalid. */
   getProfile(token: string): Promise<IdentityProfile>;
   /** Active org / team memberships. Throws 'membership_unverifiable' if GitHub can't confirm. */
   getMemberships(token: string): Promise<Memberships>;
   /** Resolve a login/slug to a numeric ID when an owner writes an ACL. */
-  resolvePrincipal(
-    token: string,
-    ref: { type: 'user'; login: string } | { type: 'org'; login: string } | { type: 'team'; org: string; slug: string },
-  ): Promise<ResolvedPrincipal>;
+  resolvePrincipal(token: string, ref: AclRef): Promise<AclEntry>;
 }
 
 // ---------------------------------------------------------------------------
@@ -129,7 +118,7 @@ export interface StorageFactory {
 
 export interface CredentialResolver {
   /** Encrypt user-supplied static credentials for storage on the bucket record. */
-  seal(bucketId: string, provider: string, plaintext: { accessKeyId: string; secretAccessKey: string }): Promise<string>;
+  seal(bucketId: string, provider: string, plaintext: StaticCredentials): Promise<string>;
   /** Obtain usable credentials for a bucket (decrypt, or STS AssumeRole). */
   resolve(bucket: Bucket): Promise<ResolvedCredentials>;
 }
@@ -138,9 +127,12 @@ export interface CredentialResolver {
 // Cross-cutting
 // ---------------------------------------------------------------------------
 
+/** "write": management calls per user. "read": object list/download per user and bucket. */
+export type LimitClass = 'write' | 'read';
+
 export interface RateLimiter {
   /** Returns true when the request is allowed. */
-  limit(key: string): Promise<boolean>;
+  limit(cls: LimitClass, key: string): Promise<boolean>;
 }
 
 export interface Clock {

@@ -1,6 +1,9 @@
 // Cookie sessions, CSRF, OAuth state handling and deployment guards.
 import { describe, expect, it } from 'vitest';
+import { RegistryError } from '../../src/core/errors.ts';
+import { MockIdentityProvider } from '../../src/identity/mock.ts';
 import { MemoryRepository } from '../../src/repository/memory.ts';
+import { LOCAL_KEYS } from '../helpers/fake-s3.ts';
 import { loadConfig } from '../../src/runtime/config.ts';
 import { inProcess, testEnv } from '../helpers/harness.ts';
 
@@ -54,7 +57,7 @@ describe('cookie session + CSRF (mock login)', () => {
     expect(user.login).toBe('alice');
     expect(csrfToken).toBeTruthy();
 
-    const body = JSON.stringify({ name: 'x', storage: { provider: 'local', bucket: 'alice-packs' }, credentials: { accessKeyId: 'LOCALALICEKEY00001', secretAccessKey: 'local-alice-secret-not-for-production' } });
+    const body = JSON.stringify({ name: 'x', storage: { provider: 'local', bucket: 'alice-packs' }, credentials: LOCAL_KEYS.alice });
     const post = (headers: Record<string, string>) =>
       app.request('http://localhost:8787/v1/buckets', { method: 'POST', body, headers: { cookie, 'content-type': 'application/json', ...headers } });
     expect((await post({})).status).toBe(403);
@@ -70,7 +73,7 @@ describe('cookie session + CSRF (mock login)', () => {
   });
 
   it('keeps redirects under a PUBLIC_BASE_URL path prefix (API Gateway stage URLs)', async () => {
-    const { app } = inProcess(new MemoryRepository(), testEnv({ PUBLIC_BASE_URL: 'http://localhost:8787/staging' }));
+    const { app } = inProcess(new MemoryRepository(), { env: testEnv({ PUBLIC_BASE_URL: 'http://localhost:8787/staging' }) });
     const r = await app.request('http://localhost:8787/login/mock?user=alice');
     expect(r.headers.get('location')).toBe('/staging/');
     expect(await (await app.request('http://localhost:8787/')).text()).toContain('<base href="/staging/">');
@@ -102,7 +105,7 @@ describe('GitHub OAuth web flow', () => {
   }
 
   it('redirects to GitHub with state and PKCE, then validates state on callback', async () => {
-    const { app } = inProcess(new MemoryRepository(), githubEnv, githubFetch());
+    const { app } = inProcess(new MemoryRepository(), { env: githubEnv, fetchImpl: githubFetch() });
     const start = await app.request('http://localhost:8787/login/github?redirect_to=/buckets');
     expect(start.status).toBe(302);
     const loc = new URL(start.headers.get('location')!);
@@ -122,7 +125,7 @@ describe('GitHub OAuth web flow', () => {
   });
 
   it('never redirects off-site after login', async () => {
-    const { app } = inProcess(new MemoryRepository(), githubEnv, githubFetch());
+    const { app } = inProcess(new MemoryRepository(), { env: githubEnv, fetchImpl: githubFetch() });
     for (const target of ['https://evil.example', '//evil.example', '/\\evil.example']) {
       const start = await app.request(`http://localhost:8787/login/github?redirect_to=${encodeURIComponent(target)}`);
       const state = new URL(start.headers.get('location')!).searchParams.get('state');
@@ -133,7 +136,7 @@ describe('GitHub OAuth web flow', () => {
   });
 
   it('does not expose the mock login in github mode', async () => {
-    const { app } = inProcess(new MemoryRepository(), githubEnv, githubFetch());
+    const { app } = inProcess(new MemoryRepository(), { env: githubEnv, fetchImpl: githubFetch() });
     expect((await app.request('http://localhost:8787/login/mock?user=alice')).status).toBe(404);
   });
 });
@@ -141,18 +144,17 @@ describe('GitHub OAuth web flow', () => {
 describe('membership failures deny org/team access', () => {
   it('returns 403 membership_unverifiable instead of granting', async () => {
     const repo = new MemoryRepository();
-    const h = inProcess(repo);
-    const reg = await h.client.call('POST', '/v1/buckets', {
-      as: 'alice',
-      body: { name: 'x', storage: { provider: 'local', bucket: 'alice-packs' }, credentials: { accessKeyId: 'LOCALALICEKEY00001', secretAccessKey: 'local-alice-secret-not-for-production' } },
-    });
-    await h.client.call('PUT', `/v1/buckets/${reg.body.id}/acl`, { as: 'alice', body: { entries: [{ type: 'org', login: 'carla-sim' }] } });
-    // Make GitHub membership lookups fail for bob
-    const identity = (h.services.core as unknown as { deps: { identity: { getMemberships: unknown } } }).deps.identity;
+    // GitHub membership lookups fail for everyone except the owner's profile/ACL calls.
+    const identity = new MockIdentityProvider();
     identity.getMemberships = async () => {
-      const { RegistryError } = await import('../../src/core/errors.ts');
       throw new RegistryError('membership_unverifiable', 'GitHub down');
     };
+    const h = inProcess(repo, { identity });
+    const reg = await h.client.call('POST', '/v1/buckets', {
+      as: 'alice',
+      body: { name: 'x', storage: { provider: 'local', bucket: 'alice-packs' }, credentials: LOCAL_KEYS.alice },
+    });
+    await h.client.call('PUT', `/v1/buckets/${reg.body.id}/acl`, { as: 'alice', body: { entries: [{ type: 'org', login: 'carla-sim' }] } });
     const r = await h.client.call('GET', `/v1/buckets/${reg.body.id}`, { as: 'bob' });
     expect(r.status).toBe(403);
     expect(r.body.error.code).toBe('membership_unverifiable');

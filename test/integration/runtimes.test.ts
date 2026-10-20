@@ -7,7 +7,7 @@ import type { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-l
 import { beforeAll } from 'vitest';
 import { createSqliteD1 } from '../helpers/d1-sqlite.ts';
 import { DYNAMO_ENDPOINT, createTable, localDynamo } from '../helpers/dynamo.ts';
-import { TEST_KEYS } from '../helpers/harness.ts';
+import { TEST_KEYS, headersFor, parseResponse } from '../helpers/harness.ts';
 import { type ApiClient, defineApiScenarios } from '../helpers/scenarios.ts';
 
 const S3 = process.env.LOCAL_S3_ENDPOINT ?? 'http://127.0.0.1:8333';
@@ -24,24 +24,6 @@ const commonEnv = {
 async function fetchUrl(url: string) {
   const r = await fetch(url);
   return { status: r.status, text: await r.text() };
-}
-
-function headersFor(opts: { as?: string; body?: unknown; headers?: Record<string, string> }) {
-  const headers: Record<string, string> = { ...(opts.headers ?? {}) };
-  if (opts.as) headers.authorization = `Bearer mock:${opts.as}`;
-  if (opts.body !== undefined) headers['content-type'] = 'application/json';
-  return headers;
-}
-
-async function parse(res: Response) {
-  const text = await res.text();
-  let body: unknown = text;
-  try {
-    body = text ? JSON.parse(text) : null;
-  } catch {
-    /* not JSON */
-  }
-  return { status: res.status, body, headers: res.headers };
 }
 
 beforeAll(async () => {
@@ -61,7 +43,7 @@ defineApiScenarios('Cloudflare Worker entry + D1 + SeaweedFS', async () => {
         body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
         redirect: 'manual',
       });
-      return parse(await worker.fetch!(req as never, env as never, ctx));
+      return parseResponse(await worker.fetch!(req as never, env as never, ctx));
     },
     fetchUrl,
   };
@@ -112,7 +94,7 @@ defineApiScenarios('AWS Lambda handler (API Gateway REST) + DynamoDB Local + Sea
       for (const [k, v] of Object.entries(r.headers ?? {})) h.set(k, String(v));
       for (const [k, vs] of Object.entries(r.multiValueHeaders ?? {})) for (const v of vs) h.append(k, String(v));
       const body = r.isBase64Encoded ? Buffer.from(r.body, 'base64').toString() : r.body;
-      return parse(new Response(r.statusCode === 204 || r.statusCode === 302 ? null : body, { status: r.statusCode, headers: h }));
+      return parseResponse(new Response(r.statusCode === 204 || r.statusCode === 302 ? null : body, { status: r.statusCode, headers: h }));
     },
     fetchUrl,
   };

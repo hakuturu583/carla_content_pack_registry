@@ -4,11 +4,11 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { DynamoDBDocumentClient, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { handle } from 'hono/aws-lambda';
-import type { Clock, RateLimiter } from '../core/ports.ts';
+import type { Clock, LimitClass, RateLimiter } from '../core/ports.ts';
 import { systemClock } from '../core/ports.ts';
 import { createApp } from '../http/app.ts';
 import { DynamoRepository } from '../repository/dynamodb.ts';
-import { DEFAULT_LIMITS, limitClass } from '../util/ratelimit.ts';
+import { DEFAULT_LIMITS, currentWindow } from '../util/ratelimit.ts';
 import { loadConfig, type RawEnv } from './config.ts';
 import { buildServices, type Services } from './services.ts';
 
@@ -21,13 +21,12 @@ export class DynamoRateLimiter implements RateLimiter {
     private readonly limits = DEFAULT_LIMITS,
   ) {}
 
-  async limit(key: string): Promise<boolean> {
-    const { limit, windowSeconds } = this.limits[limitClass(key)];
-    const window = Math.floor(this.clock.now() / 1000 / windowSeconds);
+  async limit(cls: LimitClass, key: string): Promise<boolean> {
+    const { limit, windowSeconds, window } = currentWindow(this.limits, cls, this.clock);
     const r = await this.doc.send(
       new UpdateCommand({
         TableName: this.table,
-        Key: { PK: `RL#${key}`, SK: String(window) },
+        Key: { PK: `RL#${cls}#${key}`, SK: String(window) },
         UpdateExpression: 'ADD #n :one SET #ttl = :ttl',
         ExpressionAttributeNames: { '#n': 'n', '#ttl': 'ttl' },
         ExpressionAttributeValues: { ':one': 1, ':ttl': (window + 2) * windowSeconds },
