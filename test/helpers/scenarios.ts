@@ -40,6 +40,8 @@ export function defineApiScenarios(label: string, setup: () => Promise<ApiClient
       const r = await api.call('GET', '/health');
       expect(r.status).toBe(200);
       expect(r.body.status).toBe('ok');
+      const cfg = await api.call('GET', '/cli/config');
+      expect(cfg.body).toEqual({ authMode: 'mock', githubClientId: null, oauthScopes: 'read:org' });
     });
 
     it('rejects unauthenticated API calls', async () => {

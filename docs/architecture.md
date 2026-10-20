@@ -13,6 +13,7 @@
 | CredentialResolver | `src/credentials/resolver.ts`（R2: 暗号化した静的キーの復号、S3: STS AssumeRole + ExternalId + セッションポリシー） |
 | CloudflareRuntime | `src/runtime/cloudflare.ts`（Workers の `fetch` / `scheduled`、D1、Workers Rate Limiting バインディング） |
 | AWSRuntime | `src/runtime/aws.ts`（API Gateway REST → Lambda、DynamoDB、Secrets Manager、DynamoDB によるレート制限） |
+| CLI | `cli/`（Rust コア `carla_pack`: API クライアント・デバイスフロー・トークン保存・ダウンロード。Python フロントエンド `carla_pack.cli`: 引数解析と表示のみ） |
 | HTTP API（共通） | `src/http/app.ts`（Hono）、`src/http/auth.ts`（セッション、CSRF、OAuth state） |
 
 ```
@@ -76,7 +77,7 @@ ACL の書き込み時は、所有者のトークンで login / slug を数値 I
 ## 認証の流れ
 
 - **ブラウザ**: `/login/github` → GitHub（`state` と PKCE `code_challenge`、スコープ `read:org`）→ `/login/github/callback` で state を Cookie と照合し、`code_verifier` 付きでトークン交換 → セッション Cookie（`__Host-` 接頭辞、HttpOnly、Secure、SameSite=Lax）。
-- **CLI**: `Authorization: Bearer <GitHub OAuth トークン>`。CLI は同じ OAuth App のデバイスフローでトークンを取得する想定です（CLI 本体はこのリポジトリの範囲外）。Bearer リクエストは CSRF の対象外です。
+- **CLI（`carla-pack`）**: `GET /cli/config` で OAuth App の client ID を取得し、GitHub のデバイスフロー（スコープ `read:org`）でトークンを取得します。以降は `Authorization: Bearer <GitHub OAuth トークン>` で API を呼びます（Bearer リクエストは CSRF の対象外）。トークンは CLI の設定ディレクトリ（パーミッション 600）に保存します。ダウンロードは署名付き URL から直接行い、Registry のトークンはストレージに送りません。
 - **CSRF**: Cookie セッションでの POST/PUT/PATCH/DELETE は `X-CSRF-Token`（`/v1/me` で取得）必須。`Origin` ヘッダーがある場合は自オリジンのみ許可。
 
 ## ダウンロードの流れ

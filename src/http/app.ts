@@ -6,6 +6,7 @@ import { getCookie } from 'hono/cookie';
 import { RegistryError, badRequest, notFound, unauthenticated } from '../core/errors.ts';
 import type { Viewer } from '../core/registry.ts';
 import type { Session } from '../core/types.ts';
+import { OAUTH_SCOPES } from '../identity/github.ts';
 import { MOCK_USERS } from '../identity/mock.ts';
 import type { Services } from '../runtime/services.ts';
 import { log } from '../util/log.ts';
@@ -86,6 +87,12 @@ export function createApp(getServices: ServicesProvider): Hono<Env> {
   app.get('/health', (c) => {
     const s = c.get('services');
     return c.json({ status: 'ok', runtime: s.runtime, environment: s.config.environment, authMode: s.config.authMode });
+  });
+
+  // Public bootstrap info for the carla-pack CLI (device-flow login needs the OAuth client ID).
+  app.get('/cli/config', (c) => {
+    const s = c.get('services');
+    return c.json({ authMode: s.config.authMode, githubClientId: s.config.github?.clientId ?? null, oauthScopes: OAUTH_SCOPES });
   });
 
   app.get('/', (c) => {

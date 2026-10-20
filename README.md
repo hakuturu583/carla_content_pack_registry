@@ -39,6 +39,7 @@ openapi/         OpenAPI 3.1
 infra/           Terraform（cloudflare / aws / aws/bootstrap）
 deploy/          wrangler 設定（ローカル用・環境別テンプレート）
 local/           Docker Compose（SeaweedFS、DynamoDB Local）
+cli/             carla-pack CLI（Rust コア + Python フロントエンド、PyO3 / maturin）
 .github/         CI とデプロイワークフロー
 ```
 
@@ -66,20 +67,22 @@ npm run dev                         # http://localhost:8787
 SeaweedFS にはユーザーごとに別々のアクセスキーを設定しています（共通の開発用資格情報はありません）。
 `alice-packs` は alice のキーでのみ、`bob-packs` は bob のキーでのみ読めます。`exposed-packs` は匿名読み取りが有効で、Private 登録時の公開検出を確認するためのものです。
 
-CLI からは Bearer トークンで呼べます（ローカルの Mock モードでは `mock:<login>`）:
+### CLI（`carla-pack`）
+
+Rust コア + Python フロントエンドの CLI が `cli/` にあります（詳細は [cli/README.md](cli/README.md)）。
 
 ```bash
-curl -s -H 'authorization: Bearer mock:alice' -H 'content-type: application/json' \
-  -d '{"name":"alice-maps","visibility":"private","storage":{"provider":"local","bucket":"alice-packs"},
-       "credentials":{"accessKeyId":"LOCALALICEKEY00001","secretAccessKey":"local-alice-secret-not-for-production"}}' \
-  http://localhost:8787/v1/buckets
-# => {"id":"<uuid>", ... "verifyStatus":"unverified"}
-curl -s -X PUT -H 'authorization: Bearer mock:alice' -H 'content-type: application/json' \
-  -d '{"entries":[{"type":"team","org":"carla-sim","slug":"maps"}]}' http://localhost:8787/v1/buckets/<uuid>/acl
-curl -s -X POST -H 'authorization: Bearer mock:alice' http://localhost:8787/v1/buckets/<uuid>/verify
-curl -s -H 'authorization: Bearer mock:alice' http://localhost:8787/v1/buckets/<uuid>/objects
-curl -s -H 'authorization: Bearer mock:alice' http://localhost:8787/v1/buckets/<uuid>/objects/maps/readme.md/download
+cd cli && uv venv && . .venv/bin/activate && uv pip install maturin && maturin develop
+carla-pack login --token mock:alice           # ローカル（Mock）。本番 Registry では `carla-pack login`（GitHub デバイスフロー）
+export CARLA_PACK_SECRET_ACCESS_KEY=local-alice-secret-not-for-production
+carla-pack bucket add alice-maps --provider local --bucket alice-packs --access-key-id LOCALALICEKEY00001
+carla-pack bucket verify alice/alice-maps
+carla-pack acl add alice/alice-maps --team carla-sim/maps
+carla-pack ls alice/alice-maps
+carla-pack pull alice/alice-maps maps/ -o ./packs
 ```
+
+curl で直接呼ぶ場合は `Authorization: Bearer mock:<login>` を付けます（例: `curl -H 'authorization: Bearer mock:alice' http://localhost:8787/v1/buckets`）。
 
 本物の GitHub OAuth App をローカルで試す場合は `.dev.vars` に `AUTH_MODE="github"` と `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` を設定し、OAuth App の Callback URL を `http://localhost:8787/login/github/callback` にします。
 
@@ -94,6 +97,7 @@ docker compose -f local/docker-compose.yml --profile aws up -d --wait   # Seawee
 npm run dev:seed
 npm run test:integration            # Worker エントリ + D1、Lambda ハンドラ + DynamoDB Local、実 SeaweedFS
 SMOKE_BASE_URL=http://localhost:8787 SMOKE_TOKEN=mock:alice SMOKE_LOCAL_FLOW=1 npm run smoke   # wrangler dev に対して
+(cd cli && cargo test && pytest)    # CLI: Rust コア（モックサーバー）と CLI の E2E（wrangler dev に対して）
 ```
 
 `test/helpers/scenarios.ts` の API 契約シナリオ（Alice/Bob/Carol による Public / Private / User / Org / Team ACL、所有者限定操作、公開検出、署名付きダウンロードなど）を、

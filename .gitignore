@@ -9,3 +9,7 @@ dist/
 *.tfplan
 coverage/
 deploy/cloudflare/*.generated.toml
+cli/target/
+cli/.venv/
+__pycache__/
+*.so

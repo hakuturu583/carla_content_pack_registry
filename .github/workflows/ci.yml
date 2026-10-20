@@ -65,8 +65,44 @@ jobs:
           npx wrangler dev --config deploy/cloudflare/wrangler.local.toml --port 8787 --ip 127.0.0.1 > wrangler.log 2>&1 &
           for i in $(seq 1 60); do curl -sf http://127.0.0.1:8787/health && break; sleep 1; done
           SMOKE_BASE_URL=http://localhost:8787 SMOKE_TOKEN=mock:alice SMOKE_LOCAL_FLOW=1 npm run smoke
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: carla-pack CLI end-to-end (against the wrangler dev registry above)
+        working-directory: cli
+        run: |
+          python -m venv .venv && . .venv/bin/activate
+          pip install "maturin>=1.9,<2" "pytest>=8"
+          maturin develop
+          CARLA_PACK_TEST_REGISTRY=http://localhost:8787 pytest -v
       - if: failure()
         run: cat wrangler.log || true
+
+  cli:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --features python -- -D warnings
+      - run: cargo test
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build wheel and run offline CLI tests
+        run: |
+          python -m venv .venv && . .venv/bin/activate
+          pip install "maturin>=1.9,<2" "pytest>=8"
+          maturin build --release -o dist
+          pip install dist/*.whl
+          carla-pack --version
+          pytest -v   # registry-dependent tests skip here; they run in the integration job
 
   terraform:
     runs-on: ubuntu-24.04

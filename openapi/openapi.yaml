@@ -278,6 +278,28 @@ paths:
                   runtime: { type: string, enum: [cloudflare, aws] }
                   environment: { type: string, enum: [local, staging, production] }
                   authMode: { type: string, enum: [github, mock] }
+  /cli/config:
+    get:
+      operationId: getCliConfig
+      tags: [system]
+      security: []
+      summary: Bootstrap info for the carla-pack CLI
+      description: |
+        The CLI uses `githubClientId` to run the GitHub OAuth device flow and then sends the
+        resulting token as `Authorization: Bearer`. The OAuth App must have device flow enabled.
+        `githubClientId` is null in mock mode (local development).
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [authMode, githubClientId, oauthScopes]
+                properties:
+                  authMode: { type: string, enum: [github, mock] }
+                  githubClientId: { type: [string, 'null'] }
+                  oauthScopes: { type: string, examples: ['read:org'] }
   /login/github:
     get:
       operationId: startGithubLogin
