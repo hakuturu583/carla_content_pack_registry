@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 from . import _core
 from ._core import CarlaPackError, Client
+from .deploy import deploy_pack
 
 
 class CliError(Exception):
@@ -180,6 +181,42 @@ def cmd_pull(args: argparse.Namespace) -> int:
     return 0
 
 
+def _carla_client(address: str) -> Any:
+    try:
+        import carla  # the CARLA Python API of the server's release
+    except ImportError:
+        raise CliError("--mount needs the CARLA Python API (pip install the carla wheel of your package)") from None
+    host, sep, port = address.rpartition(":")
+    if not sep:
+        host, port = address, "2000"
+    c = carla.Client(host, int(port))
+    c.set_timeout(60.0)
+    return c
+
+
+def cmd_install(args: argparse.Namespace) -> int:
+    pack = deploy_pack(
+        args.bucket,
+        args.key,
+        args.packs_dir,
+        carla_client=_carla_client(args.mount) if args.mount else None,
+        base_release=args.base_release,
+        force=args.force,
+        client=_client(args),
+    )
+
+    def human() -> None:
+        print(f"installed {pack['name']} {pack['version']} ({pack['base_release']}) -> {pack['path']}")
+        print(f"  maps: {', '.join(pack['maps']) or '-'}")
+        if pack["mounted"]:
+            print(f"  mounted on {args.mount}")
+        else:
+            print(f"  not mounted: use --mount HOST[:PORT] or client.mount_content_pack({str(pack['path'])!r})")
+
+    _out(args, pack, human)
+    return 0
+
+
 # --------------------------------------------------------------------------- bucket management
 
 
@@ -331,6 +368,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-o", "--output", default=".", help="output directory (default: current directory)")
     s.add_argument("-f", "--force", action="store_true", help="overwrite existing files")
     s.add_argument("-j", "--jobs", type=int, default=4, help="parallel downloads (default: 4)")
+
+    s = command(
+        sub, "install", "download, verify and install a content pack (optionally mount it)", cmd_install, bucket=True
+    )
+    s.add_argument("key", help="object key of the pack tarball (<Pack>-<version>-<base release>.tar.gz)")
+    s.add_argument("--packs-dir", required=True, help="install as <DIR>/<Pack> (e.g. <package>/Linux/CarlaUnreal/Packs)")
+    s.add_argument("--base-release", help="refuse a pack built for another release (e.g. carla-0.10.0-Linux)")
+    s.add_argument("--mount", metavar="HOST[:PORT]", help="mount it on this running CARLA server (needs the carla module)")
+    s.add_argument("-f", "--force", action="store_true", help="replace an installed pack and unmount a mounted one")
 
     bsub = command(sub, "bucket", "register and manage your buckets").add_subparsers(
         dest="bucket_command", required=True, metavar="ACTION"

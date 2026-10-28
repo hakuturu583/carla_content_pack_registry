@@ -34,6 +34,14 @@ class Client:
         jobs: int = 4,
         on_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> int: ...
+    def install_pack(
+        self,
+        id: str,
+        key: str,
+        packs_dir: str | PathLike[str],
+        base_release: str | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]: ...
 
 def device_login(client_id: str, scope: str, on_code: Callable[[str, str], None]) -> str: ...
 def bucket_ref(bucket: dict[str, Any]) -> str: ...

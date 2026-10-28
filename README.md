@@ -80,6 +80,7 @@ carla-pack bucket verify alice/alice-maps
 carla-pack acl add alice/alice-maps --team carla-sim/maps
 carla-pack ls alice/alice-maps
 carla-pack pull alice/alice-maps maps/ -o ./packs
+carla-pack install alice/alice-maps packs/<Pack>-<ver>-<release>.tar.gz --packs-dir <package>/Linux/CarlaUnreal/Packs --mount localhost:2000   # CARLA の carla_pack.py で作った pack をバケットに置いた場合
 ```
 
 curl で直接呼ぶ場合は `Authorization: Bearer mock:<login>` を付けます（例: `curl -H 'authorization: Bearer mock:alice' http://localhost:8787/v1/buckets`）。
