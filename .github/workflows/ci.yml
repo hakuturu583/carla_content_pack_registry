@@ -90,6 +90,10 @@ jobs:
         working-directory: cli
     steps:
       - uses: actions/checkout@v5
+      # The sdist and wheels are built from cli/, which cannot reach the root LICENSE,
+      # so cli/ carries a copy (a symlink would arrive as a text file on Windows).
+      - name: cli/LICENSE is the repository LICENSE
+        run: cmp ../LICENSE LICENSE
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

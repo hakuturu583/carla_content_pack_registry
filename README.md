@@ -116,4 +116,4 @@ SMOKE_BASE_URL=http://localhost:8787 SMOKE_TOKEN=mock:alice SMOKE_LOCAL_FLOW=1 n
 
 ## ライセンス
 
-リポジトリのライセンスは未決定です（`package.json` は `UNLICENSED`）。依存関係のライセンスは [docs/phase0-audit.md](docs/phase0-audit.md) を参照してください。
+[Apache License 2.0](LICENSE) です。依存関係のライセンスは [docs/phase0-audit.md](docs/phase0-audit.md) を参照してください。

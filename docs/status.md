@@ -74,7 +74,6 @@
 11. 開発依存の advisory（vitest 3 系）。vitest 4 への更新が npm 10.9 の依存解決エラーで失敗したため保留。
 12. 監査ログの参照 API（運営者向け）は無い。DB とログ基盤から参照する運用。
 13. CLI の残り: アップロード（`push`。署名付き PUT を Registry が発行するか、ユーザー自身の資格情報で直接置くかの方針決定が必要）、Content Pack のマニフェスト／バージョン管理、OS キーチェーンへのトークン保存、PyPI 公開（trusted publishing の設定が必要。wheel のビルドは `.github/workflows/cli-wheels.yml`）。
-14. リポジトリのライセンス未決定。
 
 ### 指示書 §11（実装対象外）
 
