@@ -3,7 +3,7 @@ requires = ["maturin>=1.9,<2"]
 build-backend = "maturin"
 
 [project]
-name = "carla-pack"
+name = "carla-pack-registry"
 description = "Discover, share and download CARLA Content Packs from a carla-pack registry"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,6 +15,12 @@ classifiers = [
   "Programming Language :: Rust",
   "Environment :: Console",
 ]
+keywords = ["carla", "content-pack", "simulator", "registry"]
+
+[project.urls]
+Homepage = "https://github.com/hakuturu583/carla_content_pack_registry"
+Repository = "https://github.com/hakuturu583/carla_content_pack_registry"
+Issues = "https://github.com/hakuturu583/carla_content_pack_registry/issues"
 
 [project.scripts]
 carla-pack = "carla_pack_registry.cli:main"

@@ -112,6 +112,7 @@ SMOKE_BASE_URL=http://localhost:8787 SMOKE_TOKEN=mock:alice SMOKE_LOCAL_FLOW=1 n
 - Cloudflare: `infra/cloudflare`（D1 / DNS / WAF / Bot 対策 / 任意で STS 用 IAM ユーザー）を Terraform で適用 → `scripts/render-wrangler.mjs` で wrangler 設定を生成 → D1 マイグレーション → `wrangler deploy` → スモークテスト。
 - AWS: `infra/aws/bootstrap`（state バケット、GitHub OIDC デプロイロール）を一度だけ適用 → `infra/aws`（API Gateway REST / Lambda / DynamoDB / WAF / Secrets Manager / CloudWatch / Budget）を Terraform で適用 → スモークテスト。
 - GitHub Actions: `.github/workflows/deploy-cloudflare.yml` / `deploy-aws.yml`（`workflow_dispatch`、plan → 承認付き環境で apply → デプロイ → スモークテスト）。
+- CLI（PyPI の `carla-pack-registry`）: PR に `release:major|minor|patch` ラベルを 1 つ付けてマージすると、バージョンの更新・タグ・GitHub Release・PyPI 公開まで `.github/workflows/release.yml` が行います（[docs/runbook.md](docs/runbook.md#8-cli-のリリースpypi)）。
 - 各ユーザー所有の R2/S3 バケットは運営側 Terraform の管理対象外です。
 
 ## ライセンス

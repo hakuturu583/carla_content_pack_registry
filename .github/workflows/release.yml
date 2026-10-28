@@ -1,0 +1,313 @@
+# Cuts releases of the carla-pack-registry Python package (the CLI in cli/) and
+# publishes them to PyPI. The mechanism is simple_lanelet2's (itself from tier4/splatsim).
+#
+#   push to main   when the merged PR carries exactly one `release:major|minor|patch`
+#                  label, the `release` job bumps cli/Cargo.toml + cli/Cargo.lock,
+#                  commits, tags `vX.Y.Z`, creates the GitHub release, and the same run
+#                  builds, tests and publishes that tag. No label: nothing happens.
+#   push a v* tag  a hand-cut tag (a hotfix, say) is built and published directly.
+#   pull_request / workflow_dispatch
+#                  a dry run: wheels and sdist are built and tested, nothing is tagged
+#                  or published. Pull requests only run it when they touch packaging.
+#
+# Publishing lives in this file rather than in an `on: push: tags` workflow on purpose:
+# the auto-release tag is pushed with GITHUB_TOKEN, and a token-pushed tag starts no
+# workflow runs.
+#
+# PyPI authentication is Trusted Publishing, so there is no token in the secrets. It is
+# configured once on PyPI (pending publisher: owner `hakuturu583`, repository
+# `carla_content_pack_registry`, workflow `release.yml`, environment `pypi`); until then
+# the publish job fails and the artifacts stay downloadable from the run. See
+# docs/runbook.md. A version can never be replaced on PyPI, so the tagged commit is
+# tested again here rather than trusting CI on the merge.
+#
+# Tags and versions are the CLI's; the registry service is deployed separately.
+
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/bump-cli-version.py
+      - cli/Cargo.toml
+      - cli/Cargo.lock
+      - cli/pyproject.toml
+      - cli/LICENSE
+      - cli/README.md
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Two release merges in quick succession must not bump from the same base version.
+concurrency:
+  group: release-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+  cancel-in-progress: false
+
+jobs:
+  # Reads the release label off the merged PR and, if there is one, bumps, tags and
+  # creates the GitHub release. Only on a push to main.
+  release:
+    name: cut the release tag
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      bump: ${{ steps.pr.outputs.bump }}
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - name: read the release label off the merged PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          pr_json=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" \
+            --jq '.[0] // empty' 2>/dev/null || true)
+          if [ -z "$pr_json" ]; then
+            echo "No PR associated with this push -- nothing to release"
+            echo "bump=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          labels=$(echo "$pr_json" | jq -r '[.labels[].name] | join(",")')
+          bump=none
+          count=0
+          for lvl in major minor patch; do
+            if echo ",$labels," | grep -q ",release:${lvl},"; then
+              bump=$lvl
+              count=$((count + 1))
+            fi
+          done
+          if [ "$count" -gt 1 ]; then
+            echo "::error::More than one release label on the PR -- pick exactly one"
+            exit 1
+          fi
+          echo "bump=${bump}" >> "$GITHUB_OUTPUT"
+          echo "Resolved bump level: ${bump}"
+
+      - uses: actions/checkout@v5
+        if: steps.pr.outputs.bump != 'none'
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: bump cli/Cargo.toml and cli/Cargo.lock together
+        if: steps.pr.outputs.bump != 'none'
+        id: bump
+        run: |
+          set -euo pipefail
+          next=$(python3 scripts/bump-cli-version.py "${{ steps.pr.outputs.bump }}")
+          echo "tag=v${next}" >> "$GITHUB_OUTPUT"
+          echo "Bumped to ${next} (${{ steps.pr.outputs.bump }})"
+
+      - name: fail if the tag already exists
+        if: steps.pr.outputs.bump != 'none'
+        run: |
+          if git rev-parse "refs/tags/${{ steps.bump.outputs.tag }}" >/dev/null 2>&1; then
+            echo "Tag ${{ steps.bump.outputs.tag }} already exists" >&2
+            exit 1
+          fi
+
+      - name: commit, tag and push
+        if: steps.pr.outputs.bump != 'none'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add cli/Cargo.toml cli/Cargo.lock
+          git commit -m "chore(release): ${{ steps.bump.outputs.tag }}"
+          git tag -a "${{ steps.bump.outputs.tag }}" -m "Release ${{ steps.bump.outputs.tag }}"
+          git push origin "HEAD:main"
+          git push origin "${{ steps.bump.outputs.tag }}"
+
+      - name: GitHub release with generated notes
+        if: steps.pr.outputs.bump != 'none'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.bump.outputs.tag }}" \
+            --title "${{ steps.bump.outputs.tag }}" \
+            --generate-notes
+
+  # Works out, for every entry point, which commit to build and whether to publish it.
+  resolve:
+    name: resolve what to build
+    needs: [release]
+    if: always()
+    runs-on: ubuntu-24.04
+    outputs:
+      proceed: ${{ steps.r.outputs.proceed }}
+      ref: ${{ steps.r.outputs.ref }}
+      publish: ${{ steps.r.outputs.publish }}
+      version: ${{ steps.r.outputs.version }}
+    steps:
+      - id: r
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          BUMP: ${{ needs.release.outputs.bump }}
+          TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          proceed=false; publish=false; ref="$SHA"
+          if [ "$EVENT" = "push" ] && [[ "$REF" == refs/tags/v* ]]; then
+            proceed=true; publish=true; ref="$REF_NAME"            # a hand-cut tag
+          elif [ "$EVENT" = "push" ] && [ "$REF" = "refs/heads/main" ]; then
+            if [ "$BUMP" != "none" ] && [ -n "$TAG" ]; then
+              proceed=true; publish=true; ref="$TAG"               # the auto-release
+            fi
+          elif [ "$EVENT" = "workflow_dispatch" ] || [ "$EVENT" = "pull_request" ]; then
+            proceed=true                                           # a dry run
+          fi
+          version=""
+          if [ "$publish" = true ]; then version="${ref#v}"; fi
+          {
+            echo "proceed=$proceed"
+            echo "publish=$publish"
+            echo "ref=$ref"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+          echo "event=$EVENT ref=$ref proceed=$proceed publish=$publish version=$version"
+
+  verify:
+    name: test the commit to release
+    needs: [resolve]
+    # `release` is skipped outside main pushes, and a skipped ancestor skips everything
+    # downstream unless the condition says otherwise -- hence `!cancelled()`.
+    if: ${{ !cancelled() && needs.resolve.result == 'success' && needs.resolve.outputs.proceed == 'true' }}
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+      - name: the version in the tag must be the version in the package
+        if: needs.resolve.outputs.publish == 'true'
+        env:
+          TAG: ${{ needs.resolve.outputs.version }}
+        run: |
+          PKG=$(python3 ../scripts/bump-cli-version.py --show)
+          echo "tag=$TAG package=$PKG"
+          test "$TAG" = "$PKG"
+      - run: cmp ../LICENSE LICENSE
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets --features python -- -D warnings
+      - run: cargo test --locked
+
+  wheels:
+    name: wheel (${{ matrix.os }} ${{ matrix.target }})
+    needs: [resolve, verify]
+    if: ${{ !cancelled() && needs.verify.result == 'success' }}
+    strategy:
+      matrix:
+        # Each wheel is built on a runner of its own architecture, so the wheel that is
+        # uploaded is also the one installed and tested below. abi3-py310: one wheel per
+        # platform serves every Python from 3.10.
+        include:
+          - { os: linux, runner: ubuntu-24.04, target: x86_64, manylinux: "2_28" }
+          - { os: linux, runner: ubuntu-24.04-arm, target: aarch64, manylinux: "2_28" }
+          - { os: macos, runner: macos-14, target: aarch64 }
+          - { os: macos, runner: macos-15-intel, target: x86_64 }
+          - { os: windows, runner: windows-2022, target: x64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: cli
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+          args: --release --locked --out dist
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      # The artifact itself, installed clean: the command, the import and the offline
+      # tests (the registry-backed ones skip without a registry).
+      - name: test the wheel that is about to be published
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/fresh"
+          PY="$RUNNER_TEMP/fresh/bin/python"
+          [ -x "$PY" ] || PY="$RUNNER_TEMP/fresh/Scripts/python.exe"
+          "$PY" -m pip install --quiet cli/dist/*.whl "pytest>=8"
+          "$PY" -m carla_pack_registry --version
+          "$PY" -c "import carla_pack_registry as m; assert m.deploy_pack and m.Client; print(m.__version__)"
+          cd cli && "$PY" -m pytest -q python/tests
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.os }}-${{ matrix.target }}
+          path: cli/dist/*.whl
+
+  sdist:
+    name: sdist
+    needs: [resolve, verify]
+    if: ${{ !cancelled() && needs.verify.result == 'success' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: cli
+          command: sdist
+          args: --out dist
+      # The sdist is what lets other platforms build from source, so it is built once
+      # into a wheel here rather than shipped untried.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: build and import a wheel from the sdist
+        run: |
+          python -m venv "$RUNNER_TEMP/fresh"
+          "$RUNNER_TEMP/fresh/bin/python" -m pip install --quiet cli/dist/*.tar.gz
+          "$RUNNER_TEMP/fresh/bin/carla-pack" --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: cli/dist/*.tar.gz
+
+  publish:
+    name: publish to PyPI
+    needs: [resolve, wheels, sdist]
+    if: ${{ !cancelled() && needs.wheels.result == 'success' && needs.sdist.result == 'success' && needs.resolve.outputs.publish == 'true' }}
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/p/carla-pack-registry
+    permissions:
+      id-token: write   # Trusted Publishing; no token in secrets.
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+      - run: ls -l dist
+      # PyPI rejects metadata that names a file the archive lacks, after the build and
+      # the OIDC exchange; checking here first costs nothing.
+      - name: check the metadata before uploading
+        run: pipx run twine check --strict dist/*
+      # PyPI never replaces a file but accepts missing ones for an existing release, so
+      # a re-run can add what an earlier attempt failed to upload.
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true

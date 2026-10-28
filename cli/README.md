@@ -8,10 +8,10 @@ CARLA Content Pack Registry のコマンドラインクライアントです。
 ## インストール
 
 ```bash
-pip install carla-pack        # 公開後。開発中は下の「開発」を参照
+pip install carla-pack-registry   # 開発中は下の「開発」を参照
 ```
 
-Python から使うときのモジュール名は `carla_pack_registry` です（CARLA 本体の `Util/ContentPacks/carla_pack.py` と同じ環境で import しても衝突しません）。
+PyPI の配布名とモジュール名は `carla-pack-registry` / `carla_pack_registry`、コマンド名は `carla-pack` です（CARLA 本体の `Util/ContentPacks/carla_pack.py` と同じ環境で import しても衝突しません）。
 
 ## 使い方
 
