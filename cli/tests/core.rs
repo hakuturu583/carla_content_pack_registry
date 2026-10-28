@@ -1,8 +1,8 @@
 //! Core behaviour against mock HTTP servers (registry, storage and GitHub).
-use carla_pack::auth::{DeviceCode, DeviceFlow, Poll};
-use carla_pack::client::{AclChange, AclRef, PullEvent};
-use carla_pack::store::{Login, Store};
-use carla_pack::{Client, Error};
+use carla_pack_registry::auth::{DeviceCode, DeviceFlow, Poll};
+use carla_pack_registry::client::{AclChange, AclRef, PullEvent};
+use carla_pack_registry::store::{Login, Store};
+use carla_pack_registry::{Client, Error};
 use httpmock::prelude::*;
 use serde_json::json;
 use std::sync::Mutex;

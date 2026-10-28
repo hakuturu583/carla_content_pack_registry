@@ -1,6 +1,6 @@
 """`carla-pack` command line interface: argument parsing, prompts and output only.
 The work (HTTP, login, credential storage, ACL edits, downloads) is done by the Rust
-core in carla_pack._core."""
+core in carla_pack_registry._core."""
 
 from __future__ import annotations
 

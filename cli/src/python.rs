@@ -1,4 +1,4 @@
-//! PyO3 bindings: the `carla_pack._core` extension module used by the Python frontend.
+//! PyO3 bindings: the `carla_pack_registry._core` extension module used by the Python frontend.
 //! Thin wrappers only; network calls release the GIL and JSON values cross the
 //! boundary as Python dicts/lists.
 use std::path::PathBuf;
