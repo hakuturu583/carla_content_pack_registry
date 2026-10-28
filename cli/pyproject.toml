@@ -16,14 +16,14 @@ classifiers = [
 ]
 
 [project.scripts]
-carla-pack = "carla_pack.cli:main"
+carla-pack = "carla_pack_registry.cli:main"
 
 [tool.maturin]
-# Rust core compiled as carla_pack._core; Python sources in python/.
+# Rust core compiled as carla_pack_registry._core; Python sources in python/.
 features = ["python"]
 python-source = "python"
-module-name = "carla_pack._core"
-include = [{ path = "python/carla_pack/py.typed", format = "wheel" }]
+module-name = "carla_pack_registry._core"
+include = [{ path = "python/carla_pack_registry/py.typed", format = "wheel" }]
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]

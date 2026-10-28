@@ -11,6 +11,8 @@ CARLA Content Pack Registry のコマンドラインクライアントです。
 pip install carla-pack        # 公開後。開発中は下の「開発」を参照
 ```
 
+Python から使うときのモジュール名は `carla_pack_registry` です（CARLA 本体の `Util/ContentPacks/carla_pack.py` と同じ環境で import しても衝突しません）。
+
 ## 使い方
 
 ```bash
@@ -64,7 +66,7 @@ carla-pack bucket rm alice/my-maps        # 登録解除のみ。ストレージ
 cd cli
 uv venv && . .venv/bin/activate
 uv pip install maturin pytest
-maturin develop            # Rust コアをビルドして carla_pack をインストール
+maturin develop            # Rust コアをビルドして carla_pack_registry をインストール
 cargo test                 # Rust のテスト（GitHub / Registry はモックサーバー）
 pytest                     # CLI の E2E テスト（ローカル Registry が必要。README ルート参照）
 maturin build --release    # wheel を作成（abi3: Python 3.10 以上で共通）

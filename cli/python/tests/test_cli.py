@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from carla_pack.cli import main
+from carla_pack_registry.cli import main
 
 REGISTRY = os.environ.get("CARLA_PACK_TEST_REGISTRY", "http://localhost:8787")
 ALICE_SECRET = "local-alice-secret-not-for-production"
