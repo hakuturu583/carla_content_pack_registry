@@ -12,6 +12,7 @@ use serde_json::Value;
 use crate::auth::DeviceFlow;
 use crate::client::{AclChange, AclRef, Client as CoreClient, display_ref};
 use crate::error::{Error, Result};
+use crate::pack::InstallOptions;
 use crate::store::{Login, Store};
 
 pyo3::create_exception!(_core, CarlaPackError, PyException, "Error from the carla-pack core. args = (message, code).");
@@ -169,6 +170,22 @@ impl Client {
             Some(e) => Err(e),
             None => Ok(total),
         }
+    }
+
+    /// Downloads the pack tarball `key`, verifies it against its manifest and installs it
+    /// as `<packs_dir>/<name>`. Returns {name, version, base_release, platform, maps, path, bytes}.
+    #[pyo3(signature = (id, key, packs_dir, base_release=None, force=false))]
+    fn install_pack<'py>(
+        &self,
+        py: Python<'py>,
+        id: &str,
+        key: &str,
+        packs_dir: PathBuf,
+        base_release: Option<String>,
+        force: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = InstallOptions { base_release, force };
+        call(py, || self.inner.install_pack(id, key, &packs_dir, &opts))
     }
 }
 

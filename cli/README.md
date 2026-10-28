@@ -29,6 +29,33 @@ carla-pack pull alice/maps                # バケット全体（-j で並列数
 
 バケットは `OWNER/NAME`、`NAME`（一意な場合）、またはバケット ID で指定します。
 
+### Content Pack をインストールして CARLA に読み込む
+
+CARLA の `Util/ContentPacks/carla_pack.py build` が作る pack の tarball（`<Pack>-<version>-<base release>.tar.gz`）を、ダウンロード → 検証 → 配置 → マウントまで一度に行います。
+
+```bash
+carla-pack install alice/maps packs/carla-0.10.0-Linux/Town01Pack-1.0.0-carla-0.10.0-Linux.tar.gz \
+  --packs-dir /opt/carla/Linux/CarlaUnreal/Packs \
+  --base-release carla-0.10.0-Linux \
+  --mount localhost:2000                 # 省略するとインストールのみ（次回起動時に読み込まれる）
+```
+
+```python
+import carla
+from carla_pack_registry import deploy_pack
+
+client = carla.Client("localhost", 2000)
+pack = deploy_pack("alice/maps", "packs/carla-0.10.0-Linux/Town01Pack-1.0.0-carla-0.10.0-Linux.tar.gz",
+                   "/opt/carla/Linux/CarlaUnreal/Packs", carla_client=client, base_release="carla-0.10.0-Linux")
+client.load_world(pack["maps"][0])
+```
+
+- tarball は Registry を経由せず、ストレージから直接ダウンロードします。展開は単一のトップフォルダの通常ファイル・ディレクトリだけを受け付け（`..`・絶対パス・リンクは拒否）、`carla-pack.json` の SHA-256 と全ファイルを照合し、manifest にないファイルがあれば拒否します。失敗したときは `--packs-dir` に何も残しません。
+- `--packs-dir` は CARLA サーバから同じパスで読める場所にしてください（パッケージの `Linux/CarlaUnreal/Packs`、`-carla-packs=<dir>` で指定したディレクトリ、またはマウントするなら任意のフォルダ）。
+- `--base-release` を付けると、別リリース向けの pack をインストール前に拒否します。マウント時にはサーバ側でも照合されます。
+- `-f` / `force=True` は同名の pack を置き換え、マウント中なら置き換える前にアンマウントします。そのマップを読み込み中などでサーバがアンマウントを拒否した場合は、何もインストールしません（別のマップを読み込むか、サーバを再起動してください）。
+- `--mount` には CARLA の Python API（パッケージの `PythonAPI/carla/dist` の wheel）が必要です。
+
 ### 自分のバケットを登録する
 
 ```bash

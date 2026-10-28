@@ -11,6 +11,12 @@ pub enum Error {
     Usage(String),
     #[error("interrupted")]
     Interrupted,
+    /// The downloaded file is not a valid content pack (layout, manifest or checksums).
+    #[error("{0}")]
+    Pack(String),
+    /// A valid pack built for another CARLA base release.
+    #[error("{0}")]
+    Incompatible(String),
     #[error("network error: {}", chain(.0))]
     Http(#[from] reqwest::Error),
     #[error("I/O error: {0}")]
@@ -28,6 +34,8 @@ impl Error {
             Self::Api { code, .. } => code,
             Self::NotLoggedIn(_) => "not_logged_in",
             Self::Interrupted => "interrupted",
+            Self::Pack(_) => "invalid_pack",
+            Self::Incompatible(_) => "incompatible_pack",
             _ => "client_error",
         }
     }

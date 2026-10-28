@@ -13,7 +13,7 @@
 | CredentialResolver | `src/credentials/resolver.ts`（R2: 暗号化した静的キーの復号、S3: STS AssumeRole + ExternalId + セッションポリシー） |
 | CloudflareRuntime | `src/runtime/cloudflare.ts`（Workers の `fetch` / `scheduled`、D1、Workers Rate Limiting バインディング） |
 | AWSRuntime | `src/runtime/aws.ts`（API Gateway REST → Lambda、DynamoDB、Secrets Manager、DynamoDB によるレート制限） |
-| CLI | `cli/`（Rust コア `carla_pack_registry`: API クライアント・デバイスフロー・トークン保存・ダウンロード。Python フロントエンド `carla_pack_registry.cli`: 引数解析と表示のみ） |
+| CLI | `cli/`（Rust コア `carla_pack_registry`: API クライアント・デバイスフロー・トークン保存・ダウンロード・Content Pack の検証付きインストール。Python フロントエンド `carla_pack_registry.cli`: 引数解析と表示、`carla_pack_registry.deploy_pack`: CARLA サーバへのマウント） |
 | HTTP API（共通） | `src/http/app.ts`（Hono）、`src/http/auth.ts`（セッション、CSRF、OAuth state） |
 
 ```
