@@ -74,6 +74,33 @@ gh release upload carla-pack-credentials credentials.json --clobber
 rm credentials.json
 ```
 
+### Hugging Face（公開 Pack 向け）
+
+誰に配ってもよい Pack は Hugging Face Hub の公開リポジトリ（dataset 推奨）に置けます。
+ストレージも鍵も鍵の workflow も不要で、Autoware のマップ（`AutowareFoundation/carla-ue5-maps`）と同じ場所に並べられます。
+ダウンロードは匿名の `resolve` URL で、トークンは送りません。中身はマニフェストの SHA-256 で検証します。
+
+1. Hugging Face に公開リポジトリを作る（gated にはしない）。
+2. [templates/pack-repo/carla-packs.huggingface.toml](../templates/pack-repo/carla-packs.huggingface.toml) を `carla-packs.toml` としてコピーする。GitHub 側の Pack リポジトリも公開でよい。
+3. Pack をアップロードしてからマニフェストに追記する（carla-pack は Hugging Face へはアップロードしません）:
+
+```bash
+hf upload AutowareFoundation/carla-packs NishishinjukuPack-1.2.0-carla-0.10.0-Linux.tar.gz \
+  packs/NishishinjukuPack-1.2.0-carla-0.10.0-Linux.tar.gz --repo-type dataset
+carla-pack publish NishishinjukuPack-1.2.0-carla-0.10.0-Linux.tar.gz --no-upload
+```
+
+```toml
+[storage]
+type = "huggingface"
+repo = "AutowareFoundation/carla-packs"
+repo_type = "dataset"     # 既定。model も可
+revision = "main"         # 既定。ブランチ・タグ・コミット
+prefix = "packs/"
+```
+
+非公開の Pack には使えません（匿名で読むため）。非公開は R2 / S3 に置いてください。
+
 ### 公開バケット
 
 誰でも取得してよい Pack は、公開読み取りのバケットに置いて `credentials = "anonymous"` にします（鍵は不要、リポジトリも公開で可）。

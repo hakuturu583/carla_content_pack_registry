@@ -236,7 +236,7 @@ def cmd_credentials(args: argparse.Namespace) -> int:
     s = _client(args).credentials_status(args.repo)
 
     def human() -> None:
-        print(f"{s['repo']}: {s['mode']}")
+        print(f"{s['repo']}: {s['storage']} ({s['mode']})")
         if s.get("access_key_id"):
             print(f"  access key : {s['access_key_id']}")
             print(f"  expires at : {s.get('expires_at') or 'never (long-lived key)'}")

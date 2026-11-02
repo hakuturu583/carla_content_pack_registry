@@ -5,12 +5,20 @@
 //! ```toml
 //! schema = 1
 //!
-//! [storage]
+//! [storage]                         # type = "s3" (the default): any S3-compatible bucket
 //! endpoint = "https://<account>.r2.cloudflarestorage.com"
 //! region = "auto"
 //! bucket = "carla-packs"
 //! prefix = "packs/"                 # optional
 //! credentials = "github-release"    # or "anonymous" for a public bucket
+//!
+//! # or, for public packs on the Hugging Face Hub:
+//! # [storage]
+//! # type = "huggingface"
+//! # repo = "AutowareFoundation/carla-packs"
+//! # repo_type = "dataset"           # default; or "model"
+//! # revision = "main"               # default; a branch, tag or commit
+//! # prefix = "packs/"
 //!
 //! [[pack]]
 //! name = "Town01Pack"
@@ -41,7 +49,7 @@ pub const CREDENTIALS_ASSET: &str = "credentials.json";
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub schema: u32,
-    pub storage: StorageConfig,
+    pub storage: Storage,
     #[serde(default, rename = "pack")]
     pub packs: Vec<PackEntry>,
 }
@@ -65,6 +73,159 @@ pub enum Addressing {
     Virtual,
 }
 
+/// Where the packs of a repository are stored.
+#[derive(Debug, Clone)]
+pub enum Storage {
+    /// An S3-compatible bucket (AWS S3, Cloudflare R2, MinIO, SeaweedFS).
+    S3(StorageConfig),
+    /// A public repository on the Hugging Face Hub (read anonymously).
+    HuggingFace(HfStorage),
+}
+
+/// `[storage]` with its `type` tag; a table without one is `s3`.
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+enum TaggedStorage {
+    S3(StorageConfig),
+    Huggingface(HfStorage),
+}
+
+impl<'de> Deserialize<'de> for Storage {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let mut table = toml::Table::deserialize(d)?;
+        table.entry("type").or_insert_with(|| "s3".into());
+        let tagged = TaggedStorage::deserialize(toml::Value::Table(table)).map_err(serde::de::Error::custom)?;
+        Ok(match tagged {
+            TaggedStorage::S3(c) => Self::S3(c),
+            TaggedStorage::Huggingface(c) => Self::HuggingFace(c),
+        })
+    }
+}
+
+impl Serialize for Storage {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            Self::S3(c) => TaggedStorage::S3(c.clone()).serialize(s),
+            Self::HuggingFace(c) => TaggedStorage::Huggingface(c.clone()).serialize(s),
+        }
+    }
+}
+
+impl Storage {
+    fn validate(&self) -> std::result::Result<(), String> {
+        match self {
+            Self::S3(c) => c.validate(),
+            Self::HuggingFace(c) => c.validate(),
+        }
+    }
+
+    pub fn prefix(&self) -> &str {
+        match self {
+            Self::S3(c) => &c.prefix,
+            Self::HuggingFace(c) => &c.prefix,
+        }
+    }
+
+    /// Path of a pack's key in the bucket / repository.
+    pub fn object_key(&self, key: &str) -> String {
+        format!("{}{key}", self.prefix())
+    }
+
+    /// How downloads are authorised: vended credentials, or none.
+    pub fn credential_mode(&self) -> CredentialMode {
+        match self {
+            Self::S3(c) => c.credentials,
+            Self::HuggingFace(_) => CredentialMode::Anonymous,
+        }
+    }
+
+    /// "bucket carla-packs" / "Hugging Face dataset org/name", for messages.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::S3(c) => format!("bucket {}", c.bucket),
+            Self::HuggingFace(c) => format!("Hugging Face {} {}", c.repo_type.as_str(), c.repo),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum HfRepoType {
+    #[default]
+    Dataset,
+    Model,
+}
+
+impl HfRepoType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dataset => "dataset",
+            Self::Model => "model",
+        }
+    }
+}
+
+/// A public Hugging Face repository holding the packs. Downloads are anonymous
+/// `resolve` URLs; the SHA-256 in the manifest pins the bytes whatever the revision.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HfStorage {
+    /// `OWNER/NAME`.
+    pub repo: String,
+    #[serde(default)]
+    pub repo_type: HfRepoType,
+    /// Branch, tag or commit; default `main`.
+    #[serde(default = "default_revision")]
+    pub revision: String,
+    #[serde(default)]
+    pub prefix: String,
+    /// The Hub; default https://huggingface.co (a mirror, or tests).
+    #[serde(default = "default_hf_endpoint")]
+    pub endpoint: String,
+}
+
+fn default_revision() -> String {
+    "main".into()
+}
+
+fn default_hf_endpoint() -> String {
+    "https://huggingface.co".into()
+}
+
+impl HfStorage {
+    fn validate(&self) -> std::result::Result<(), String> {
+        validate_endpoint(&self.endpoint)?;
+        validate_repo(&self.repo).map_err(|_| format!("storage.repo {:?} must be OWNER/NAME", self.repo))?;
+        if self.revision.is_empty()
+            || self.revision.contains(['?', '#', ' ', '\\'])
+            || !is_clean_relpath(&self.revision)
+        {
+            return Err(format!("storage.revision {:?} is not a valid revision", self.revision));
+        }
+        validate_prefix(&self.prefix)
+    }
+}
+
+fn validate_endpoint(endpoint: &str) -> std::result::Result<(), String> {
+    let url = Url::parse(endpoint).map_err(|e| format!("storage.endpoint: {e}"))?;
+    let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+    if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
+        return Err("storage.endpoint must be https:// (http:// only for localhost)".into());
+    }
+    if url.path() != "/" || url.query().is_some() || !url.username().is_empty() || url.password().is_some() {
+        return Err("storage.endpoint must be a bare origin such as https://<account>.r2.cloudflarestorage.com".into());
+    }
+    Ok(())
+}
+
+fn validate_prefix(prefix: &str) -> std::result::Result<(), String> {
+    if !prefix.is_empty() && !(prefix.ends_with('/') && is_clean_relpath(&prefix[..prefix.len() - 1])) {
+        return Err(format!("storage.prefix {prefix:?} must be a relative path ending in /"));
+    }
+    Ok(())
+}
+
+/// `[storage]` of an S3-compatible bucket.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StorageConfig {
@@ -134,16 +295,7 @@ impl Manifest {
 
 impl StorageConfig {
     fn validate(&self) -> std::result::Result<(), String> {
-        let url = Url::parse(&self.endpoint).map_err(|e| format!("storage.endpoint: {e}"))?;
-        let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
-        if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
-            return Err("storage.endpoint must be https:// (http:// only for localhost)".into());
-        }
-        if url.path() != "/" || url.query().is_some() || !url.username().is_empty() || url.password().is_some() {
-            return Err(
-                "storage.endpoint must be a bare origin such as https://<account>.r2.cloudflarestorage.com".into()
-            );
-        }
+        validate_endpoint(&self.endpoint)?;
         let b = &self.bucket;
         if b.len() < 3
             || b.len() > 63
@@ -154,20 +306,11 @@ impl StorageConfig {
         if !self.region.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') || self.region.is_empty() {
             return Err(format!("storage.region {:?} is not a valid region", self.region));
         }
-        if !self.prefix.is_empty()
-            && !(self.prefix.ends_with('/') && is_clean_relpath(&self.prefix[..self.prefix.len() - 1]))
-        {
-            return Err(format!("storage.prefix {:?} must be a relative path ending in /", self.prefix));
-        }
+        validate_prefix(&self.prefix)?;
         if self.credentials_tag.is_empty() || self.credentials_tag.contains(['/', ' ']) {
             return Err(format!("storage.credentials_tag {:?} is not a valid tag", self.credentials_tag));
         }
         Ok(())
-    }
-
-    /// Full object key for a pack's key.
-    pub fn object_key(&self, key: &str) -> String {
-        format!("{}{key}", self.prefix)
     }
 }
 
@@ -336,8 +479,9 @@ mod tests {
     #[test]
     fn parses_and_validates() {
         let m = Manifest::parse(&manifest(&pack("1.0.0", "carla-0.10.0-Linux")), "t").unwrap();
-        assert_eq!(m.storage.region, "auto");
-        assert_eq!(m.storage.credentials_tag, DEFAULT_CREDENTIALS_TAG);
+        let Storage::S3(storage) = &m.storage else { panic!("a table without type is s3") };
+        assert_eq!(storage.region, "auto");
+        assert_eq!(storage.credentials_tag, DEFAULT_CREDENTIALS_TAG);
         assert_eq!(m.packs[0].maps, ["Town01"]);
 
         let dup = manifest(&format!("{}{}", pack("1.0.0", "r"), pack("1.0.0", "r")));
@@ -360,6 +504,39 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn hugging_face_storage() {
+        let hf = |extra: &str| {
+            format!("schema = 1\n[storage]\ntype = \"huggingface\"\nrepo = \"AutowareFoundation/carla-packs\"\n{extra}")
+        };
+        let m = Manifest::parse(&format!("{}{}", hf(""), pack("1.0.0", "r")), "t").unwrap();
+        let Storage::HuggingFace(s) = &m.storage else { panic!("{:?}", m.storage) };
+        assert_eq!(
+            (s.repo_type, s.revision.as_str(), s.endpoint.as_str()),
+            (HfRepoType::Dataset, "main", "https://huggingface.co")
+        );
+        assert_eq!(m.storage.credential_mode(), CredentialMode::Anonymous);
+        assert_eq!(m.storage.describe(), "Hugging Face dataset AutowareFoundation/carla-packs");
+
+        // The manifest survives a round trip (publish re-serialises it to validate a new entry).
+        let again = Manifest::parse(&toml::to_string(&m).unwrap(), "t").unwrap();
+        assert!(matches!(again.storage, Storage::HuggingFace(_)));
+        let s3 = Manifest::parse(&manifest(""), "t").unwrap();
+        assert!(matches!(Manifest::parse(&toml::to_string(&s3).unwrap(), "t").unwrap().storage, Storage::S3(_)));
+
+        for bad in [
+            hf("bucket = \"packs\"\n"), // an S3 key on a Hugging Face storage
+            hf("revision = \"../x\"\n"),
+            hf("repo_type = \"space\"\n"),
+            hf("").replace("AutowareFoundation/carla-packs", "no-owner"),
+            hf("").replace("huggingface", "gcs"),
+            manifest("").replace("[storage]", "[storage]\ntype = \"huggingface\""), // S3 keys on it
+        ] {
+            assert!(Manifest::parse(&bad, "t").is_err(), "{bad}");
+        }
+        assert!(Manifest::parse(&manifest("").replace("[storage]", "[storage]\ntype = \"s3\""), "t").is_ok());
     }
 
     #[test]

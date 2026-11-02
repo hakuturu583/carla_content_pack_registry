@@ -25,6 +25,7 @@
 | 長期鍵の流出 | 配るのは 12 時間で切れる一時鍵。発行元の秘密（Cloudflare API トークン）は Actions secret、AWS は OIDC で秘密なし | — |
 | 期限切れの鍵 | 期限まで 2 分未満の鍵は使わず、原因（workflow が止まっている）を示すエラー | `expired_or_missing_credentials_are_reported` |
 | エンドポイントの差し替え（SSRF 的な誘導） | `endpoint` は https のオリジンのみ（http は localhost だけ）、パス・クエリ・ユーザー情報を禁止。キーは正規化された相対パスのみ | `src/manifest.rs` のテスト |
+| Hugging Face 上の公開 Pack | トークン（GitHub・Hugging Face とも）を一切送らない匿名取得。リポジトリ（`main` など）の中身が書き換えられても、マニフェストの SHA-256 と一致しなければインストールしない。公開リポジトリなので、置いた Pack は誰でも取得できる前提 | `public_packs_come_from_hugging_face_without_any_token` |
 | ローカルの資格情報 | 保存するトークンは `config.json`（600）。ストレージの鍵はメモリにだけ置き、ログやエラーに出さない（`Debug` でも秘匿） | `src/sigv4.rs` のテスト |
 
 ## 失効と反映の遅延

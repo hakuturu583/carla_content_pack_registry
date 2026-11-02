@@ -13,6 +13,7 @@ carla-pack ──(1) GitHub API: carla-packs.toml を読む ──────�
   マニフェスト `carla-packs.toml` と、Release に置かれた読み取り専用のストレージ鍵を取得できます。読めない人には GitHub が 404 を返すだけです。
   誰に配るかは、そのリポジトリの Read 権限（ユーザー / Team / Organization）でそのまま決まります。
 - **ファイルは S3 互換ストレージから直接** ダウンロードします（Cloudflare R2、AWS S3、MinIO、SeaweedFS など）。
+  誰に配ってもよい Pack は **Hugging Face Hub の公開リポジトリ** にも置けます（鍵不要、匿名で取得）。
 - 鍵は Pack リポジトリの GitHub Actions が **6 時間ごとに作り直す有効期限 12 時間の一時鍵** で、バケットの Pack 用プレフィックスを読むことしかできません。
   R2 は一時認証情報 API、AWS は GitHub OIDC で発行するので、長期の鍵はどこにも保存しません。
 - ダウンロードしたファイルはマニフェストの **SHA-256 とサイズ**、さらに Pack 自身の `carla-pack.json` の全ファイルのハッシュで検証してから配置します。

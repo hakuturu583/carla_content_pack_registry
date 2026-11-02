@@ -53,6 +53,8 @@ prefix = "packs/"                                        # 任意。"/" で終�
 addressing = "path"                                      # path（既定）| virtual
 credentials = "github-release"                           # github-release | anonymous（公開バケット）
 credentials_tag = "carla-pack-credentials"               # 任意
+# type = "s3" は省略可（既定）。公開 Pack を Hugging Face に置く場合:
+# type = "huggingface" / repo = "OWNER/NAME" / repo_type = "dataset" | "model" / revision = "main" / prefix
 
 [[pack]]
 name = "NishishinjukuPack"            # CARLA の Pack 名（英字始まりの英数字と _）
@@ -95,6 +97,7 @@ yanked = false                        # 任意。true にすると選ばれな�
 | `src/github.rs` | アクセス確認: マニフェストと鍵を GitHub API から読む。404 → `no_access` |
 | `src/manifest.rs` | `carla-packs.toml` の型・検証、参照 `OWNER/REPO/PACK[@VER]`、リリースの選択 |
 | `src/sigv4.rs` | AWS Signature V4（ヘッダ署名、`UNSIGNED-PAYLOAD`）。AWS の公式テストベクタで検証 |
+| `src/hf.rs` | Hugging Face の公開リポジトリからの取得（匿名の `resolve` URL、Range で再開） |
 | `src/s3.rs` | GET（Range で再開）/ HEAD / PUT、64 MiB 超はマルチパートアップロード（失敗時は abort）。path / virtual-host 形式 |
 | `src/client.rs` | `resolve` / `find_map` / `fetch`（キャッシュと検証）/ `install` / `publish` |
 | `src/pack.rs` | tarball の安全な展開、`carla-pack.json` による全ファイル照合、配置 |

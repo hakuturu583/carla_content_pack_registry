@@ -323,5 +323,69 @@ fn the_pack_repository_template_is_a_valid_manifest() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("templates/pack-repo/carla-packs.toml");
     let text = fs::read_to_string(path).unwrap().replace("<ACCOUNT_ID>", "0123456789abcdef0123456789abcdef");
     let m = carla_pack_registry::manifest::Manifest::parse(&text, "template").unwrap();
-    assert!(m.packs.is_empty() && m.storage.prefix == "packs/");
+    assert!(m.packs.is_empty() && m.storage.prefix() == "packs/");
+}
+
+#[test]
+fn public_packs_come_from_hugging_face_without_any_token() {
+    let w = World::new(); // `storage` plays the Hub, `assets` its CDN
+    let body = mini_pack(&[]);
+    let manifest = format!(
+        "schema = 1\n[storage]\ntype = \"huggingface\"\nrepo = \"AutowareFoundation/carla-packs\"\n\
+         revision = \"v1\"\nprefix = \"packs/\"\nendpoint = \"{}\"\n\n[[pack]]\nname = \"MiniPack\"\nversion = \"1.0.0\"\n\
+         base_release = \"carla-0.10.0-Linux\"\nplatform = \"Linux\"\nkey = \"{KEY}\"\nsha256 = \"{}\"\nsize = {}\n\
+         maps = [\"MiniTown\"]\n",
+        w.storage.base_url(),
+        hex_sha256(&body),
+        body.len()
+    );
+    w.serve_manifest(REPO, &manifest);
+    let resolve = w.storage.mock(|when, then| {
+        when.method(GET)
+            .path(format!("/datasets/AutowareFoundation/carla-packs/resolve/v1/packs/{KEY}"))
+            .header_missing("authorization");
+        then.status(302).header("location", w.assets.url("/cdn/blob"));
+    });
+    let cdn = w.assets.mock(|when, then| {
+        when.method(GET).path("/cdn/blob").header_missing("authorization");
+        then.status(200).body(body.clone());
+    });
+
+    let c = w.client(Some(TOKEN), &[REPO]);
+    let release = c.find_map("MiniTown", None, &Filter::default()).unwrap();
+    let pack = c.install(&release, &w.packs(), &InstallOptions::default()).unwrap();
+    assert_eq!(pack.maps, ["MiniTown"]);
+    resolve.assert();
+    cdn.assert();
+
+    let status = c.credentials_status(REPO).unwrap(); // no credential release is looked up
+    assert_eq!(
+        (status.storage.as_str(), status.access_key_id),
+        ("Hugging Face dataset AutowareFoundation/carla-packs", None)
+    );
+
+    // publish never uploads there, but says how; --no-upload appends the entry.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("carla-packs.toml");
+    fs::write(&file, manifest.split("\n[[pack]]").next().unwrap()).unwrap();
+    let tarball = dir.path().join("MiniPack-2.0.0.tar.gz");
+    fs::write(&tarball, mini_pack_version("2.0.0", &[])).unwrap();
+    match publish(&file, &tarball, &PublishOptions { upload: true, ..Default::default() }, None) {
+        Err(Error::Usage(msg)) => assert!(
+            msg.contains("hf upload AutowareFoundation/carla-packs") && msg.contains("packs/MiniPack-2.0.0.tar.gz"),
+            "{msg}"
+        ),
+        other => panic!("unexpected {other:?}"),
+    }
+    let entry = publish(&file, &tarball, &PublishOptions::default(), None).unwrap();
+    assert_eq!(entry.version, "2.0.0");
+    let text = fs::read_to_string(&file).unwrap();
+    assert!(text.contains("type = \"huggingface\"") && text.contains("version = \"2.0.0\""), "{text}");
+}
+
+#[test]
+fn the_hugging_face_template_is_a_valid_manifest() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("templates/pack-repo/carla-packs.huggingface.toml");
+    let m = carla_pack_registry::manifest::Manifest::parse(&fs::read_to_string(path).unwrap(), "template").unwrap();
+    assert!(matches!(m.storage, carla_pack_registry::manifest::Storage::HuggingFace(_)));
 }

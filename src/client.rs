@@ -13,7 +13,10 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 use crate::github::{GitHub, Vended};
-use crate::manifest::{CredentialMode, Filter, Manifest, PackEntry, PackRef, is_sha256, select, validate_repo};
+use crate::manifest::{
+    CredentialMode, Filter, HfStorage, Manifest, PackEntry, PackRef, Storage, StorageConfig, is_sha256, select,
+    validate_repo,
+};
 use crate::pack::{self, Expected, InstallOptions, InstalledPack};
 use crate::s3::Bucket;
 use crate::sigv4::{Credentials, hex};
@@ -59,6 +62,8 @@ impl Release {
 #[derive(Debug, Clone, Serialize)]
 pub struct CredentialStatus {
     pub repo: String,
+    /// "bucket NAME" or "Hugging Face dataset OWNER/NAME".
+    pub storage: String,
     pub mode: CredentialMode,
     pub access_key_id: Option<String>,
     pub expires_at: Option<String>,
@@ -216,7 +221,8 @@ impl Client {
 
     /// Storage credentials of `repo`, read once per client (and again once they near expiry).
     fn storage_credentials(&self, repo: &str, manifest: &Manifest) -> Result<Option<Credentials>> {
-        if manifest.storage.credentials == CredentialMode::Anonymous {
+        let Storage::S3(storage) = &manifest.storage else { return Ok(None) };
+        if storage.credentials == CredentialMode::Anonymous {
             return Ok(None);
         }
         let key = repo.to_ascii_lowercase();
@@ -225,7 +231,7 @@ impl Client {
                 return Ok(Some(v.credentials.clone()));
             }
         }
-        let vended = self.github.credentials(repo, &manifest.storage.credentials_tag)?;
+        let vended = self.github.credentials(repo, &storage.credentials_tag)?;
         let creds = vended.credentials.clone();
         self.credentials.lock().unwrap().insert(key, vended);
         Ok(Some(creds))
@@ -233,10 +239,18 @@ impl Client {
 
     pub fn credentials_status(&self, repo: &str) -> Result<CredentialStatus> {
         let m = self.manifest(repo)?;
-        let mode = m.storage.credentials;
-        let mut status = CredentialStatus { repo: repo.to_string(), mode, access_key_id: None, expires_at: None };
-        if mode == CredentialMode::GithubRelease {
-            let v = self.github.credentials(repo, &m.storage.credentials_tag)?;
+        let mode = m.storage.credential_mode();
+        let mut status = CredentialStatus {
+            repo: repo.to_string(),
+            storage: m.storage.describe(),
+            mode,
+            access_key_id: None,
+            expires_at: None,
+        };
+        if let Storage::S3(StorageConfig { credentials: CredentialMode::GithubRelease, credentials_tag, .. }) =
+            &m.storage
+        {
+            let v = self.github.credentials(repo, credentials_tag)?;
             status.access_key_id = Some(v.credentials.access_key_id);
             status.expires_at = v.expires_at.map(time::rfc3339);
         }
@@ -257,9 +271,9 @@ impl Client {
         }
         let manifest = self.manifest(&release.repo)?;
         let creds = self.storage_credentials(&release.repo, &manifest)?;
-        let bucket = Bucket { config: &manifest.storage, credentials: creds.as_ref() };
+        let source = Source::new(&manifest.storage, creds.as_ref());
         let object_key = manifest.storage.object_key(&release.pack.key);
-        let mut res = bucket.get(&self.http, &object_key)?;
+        let mut res = source.get(&self.http, &object_key)?;
 
         let dir = dest.parent().expect("blob path has a parent");
         fs::create_dir_all(dir)?;
@@ -296,7 +310,7 @@ impl Client {
                 }
                 resumes += 1;
                 std::thread::sleep(RESUME_DELAY * resumes);
-                res = bucket.get_from(&self.http, &object_key, total)?.ok_or_else(|| {
+                res = source.get_from(&self.http, &object_key, total)?.ok_or_else(|| {
                     Error::Usage(format!(
                         "downloading {object_key} broke off ({error}) and the storage cannot resume it"
                     ))
@@ -335,6 +349,35 @@ impl Client {
         }
         let tarball = self.fetch(release)?;
         pack::install(&tarball, packs_dir, &release.expected(), opts)
+    }
+}
+
+/// Where a download comes from: a (signed) S3 bucket or a public Hugging Face repository.
+enum Source<'a> {
+    S3(Bucket<'a>),
+    HuggingFace(&'a HfStorage),
+}
+
+impl<'a> Source<'a> {
+    fn new(storage: &'a Storage, credentials: Option<&'a Credentials>) -> Self {
+        match storage {
+            Storage::S3(config) => Self::S3(Bucket { config, credentials }),
+            Storage::HuggingFace(hf) => Self::HuggingFace(hf),
+        }
+    }
+
+    fn get(&self, http: &Http, path: &str) -> Result<reqwest::blocking::Response> {
+        match self {
+            Self::S3(b) => b.get(http, path),
+            Self::HuggingFace(hf) => crate::hf::get(http, hf, path),
+        }
+    }
+
+    fn get_from(&self, http: &Http, path: &str, offset: u64) -> Result<Option<reqwest::blocking::Response>> {
+        match self {
+            Self::S3(b) => b.get_from(http, path, offset),
+            Self::HuggingFace(hf) => crate::hf::get_from(http, hf, path, offset),
+        }
     }
 }
 
@@ -404,6 +447,20 @@ pub fn publish(
     Manifest::parse(&toml::to_string(&check).map_err(|e| Error::Usage(e.to_string()))?, "the new entry")?;
 
     if opts.upload {
+        let storage = match &manifest.storage {
+            Storage::S3(s) => s,
+            Storage::HuggingFace(hf) => {
+                return Err(Error::Usage(format!(
+                    "carla-pack does not upload to Hugging Face; upload with \
+                     `hf upload {} {} {} --repo-type {}` (to revision {}), then publish with --no-upload",
+                    hf.repo,
+                    tarball.display(),
+                    manifest.storage.object_key(&entry.key),
+                    hf.repo_type.as_str(),
+                    hf.revision
+                )));
+            }
+        };
         let creds = upload_credentials.ok_or_else(|| {
             Error::Usage(
                 "uploading needs write credentials for the bucket: set CARLA_PACK_UPLOAD_ACCESS_KEY_ID and \
@@ -412,12 +469,12 @@ pub fn publish(
             )
         })?;
         let http = http_client()?;
-        let bucket = Bucket { config: &manifest.storage, credentials: Some(creds) };
+        let bucket = Bucket { config: storage, credentials: Some(creds) };
         let object_key = manifest.storage.object_key(&entry.key);
         if !opts.overwrite && bucket.head(&http, &object_key)?.is_some() {
             return Err(Error::Usage(format!(
                 "{object_key} already exists in bucket {}; pass overwrite to replace it",
-                manifest.storage.bucket
+                storage.bucket
             )));
         }
         bucket.put_file(&http, &object_key, tarball, opts.part_size.unwrap_or(crate::s3::DEFAULT_PART_SIZE))?;
