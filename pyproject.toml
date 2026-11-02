@@ -1,0 +1,32 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "carla-pack"
+description = "Share CARLA content packs through GitHub repository access and S3-compatible storage (R2, S3, MinIO)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dynamic = ["version"]
+classifiers = [
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Rust",
+  "Environment :: Console",
+]
+
+[project.scripts]
+carla-pack = "carla_pack_registry.cli:main"
+
+[tool.maturin]
+# Rust core compiled as carla_pack_registry._core; Python sources in python/.
+features = ["python"]
+python-source = "python"
+module-name = "carla_pack_registry._core"
+include = [{ path = "python/carla_pack_registry/py.typed", format = "wheel" }]
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
+# importlib: the tests import the installed wheel, never the sources in python/ (which lack _core).
+addopts = "--import-mode=importlib"

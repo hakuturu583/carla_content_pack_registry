@@ -1,0 +1,23 @@
+# carla-pack manifest. Copy to the root of a pack repository.
+#
+# Anyone who can read this repository can download these packs: that is the whole
+# access control. Make the repository private and grant read access to the users,
+# teams or organisations that may download.
+schema = 1
+
+[storage]
+# Cloudflare R2: https://<ACCOUNT_ID>.r2.cloudflarestorage.com, region "auto".
+# AWS S3: https://s3.<region>.amazonaws.com and the bucket's region.
+endpoint = "https://<ACCOUNT_ID>.r2.cloudflarestorage.com"
+region = "auto"
+bucket = "carla-packs"
+# Packs live under this prefix; the vended credentials can only read below it.
+prefix = "packs/"
+# "github-release": read-only credentials published as the release asset
+#   credentials.json of the release "carla-pack-credentials" (see the workflows).
+# "anonymous": a public bucket; no credentials.
+credentials = "github-release"
+
+# Entries are appended by `carla-pack publish` and never edited afterwards:
+# a published (name, version, base_release, platform) always names the same bytes.
+# To withdraw one, add `yanked = true` (lock files that pin its sha256 still work).

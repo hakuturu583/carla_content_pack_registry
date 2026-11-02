@@ -1,39 +1,50 @@
 # セキュリティ
 
-## 指示書 §6 への対応
+## 信頼の境界
 
-| 要件 | 対応 | 確認方法 |
+| 何を信じるか | 理由 |
+| --- | --- |
+| GitHub のリポジトリ権限 | 「Pack リポジトリを読める人 = 取得してよい人」と定義している。マニフェストも鍵もこの権限でしか読めない |
+| Pack リポジトリへの書き込み権限を持つ人 | マニフェスト（どこから・どの SHA-256 で取るか）と鍵の workflow を変更できる。リポジトリの Write 権限は Pack の公開者に限る |
+| ストレージの鍵の権限 | 一時鍵は `object-read-only`（R2）/ セッションポリシーで `s3:GetObject`（AWS）、いずれもプレフィックス限定 |
+
+利用者側は、マニフェストの SHA-256・サイズと、Pack 自身の `carla-pack.json` の全ファイルのハッシュを検証してから配置します。
+ストレージ側のファイルが差し替えられても、マニフェストと一致しなければ何もインストールしません。
+
+## 対策の一覧
+
+| 脅威 | 対策 | 確認 |
 | --- | --- | --- |
-| OAuth の state 検証、安全なセッション Cookie、CSRF 対策 | state + PKCE（S256）、state は HttpOnly Cookie と定数時間比較。セッション Cookie は `__Host-`、HttpOnly、Secure、SameSite=Lax。Cookie セッションの変更系リクエストは `X-CSRF-Token` と Origin を検証。ログイン後のリダイレクトは同一サイトの相対パスのみ | `test/unit/auth.test.ts` |
-| GitHub 数値 ID を内部識別子に使用 | ユーザー・Org・Team すべて数値 ID。名前は表示用のみ | `test/unit/authz.test.ts`（ID 名前空間の混同も検査） |
-| Org の OAuth App 承認が必要なケース | メンバーシップ取得が 403 の場合は理由付きで拒否し、`/v1/me` の `membershipError` に表示。Team の名前解決失敗時も承認の可能性を案内 | `test/unit/github.test.ts` |
-| GitHub API 失敗・権限不明時は拒否 | `membership_unverifiable` / `upstream_unavailable` を返し、監査ログに deny を記録 | `test/unit/auth.test.ts`、`github.test.ts` |
-| ページネーション、キャッシュ、レート制限 | Link ヘッダーで最大 10 ページ（api.github.com 以外の next は無視）。メンバーシップ 5 分キャッシュ、Bearer プロファイル 60 秒キャッシュ。GitHub のレート制限は 503 | `github.test.ts` |
-| 資格情報の暗号化、レスポンス・ログ・Terraform state に平文を残さない | AES-256-GCM（HKDF で用途別鍵、AAD でバケット ID / セッションに束縛、鍵ローテーション対応）。API は秘密情報を返さない（所有者にも）。ログは秘密っぽいキーを自動マスク。Terraform はシークレットの「入れ物」だけを作り、値は CLI で投入 | `crypto.test.ts`、`sts.test.ts`、契約テスト（レスポンスに鍵が含まれないこと） |
-| SSRF 防止 | ユーザーは URL を一切指定できない。R2 はアカウント ID（32 桁 hex）、S3 はリージョン（正規表現）とバケット名（ドット不可）からエンドポイントを生成。`local` は `ENVIRONMENT=local` のみで、エンドポイントはサーバー設定 | `storage.test.ts`、契約テスト |
-| Private バケットの直接公開による ACL 迂回の防止 | 検証時に匿名の一覧・読み取りが拒否されることを確認し、公開されていれば検証失敗（ダウンロード不可） | 契約テスト（`exposed-packs`） |
-| WAF による IP / Bot / DDoS 対策 | Cloudflare: カスタムルール、IP レート制限、Bot Fight Mode、（Pro 以上）Managed Ruleset。AWS: WAF（IP レピュテーション、Common、Known Bad Inputs、IP レート制限、任意で Bot Control）を API Gateway REST ステージに関連付け、ステージのスロットリング、Lambda 同時実行上限 | `terraform validate`（実適用は未実施） |
-| アプリ層のレート制限 | GitHub ユーザー単位（書き込み 30/分）とユーザー×バケット単位（読み取り 120/分）。Cloudflare は Workers Rate Limiting、AWS は DynamoDB のアトミックカウンタ | `ratelimit.test.ts` |
-| 公開環境で Mock 認証を禁止 | 設定読込で拒否（fail closed）、WAF で `/login/mock` をブロック、`/login/mock` ハンドラ自体も二重チェック | `auth.test.ts` |
-| ログ・監査証跡・メトリクス・コスト監視 | 構造化 JSON ログ（リクエスト ID、ユーザー ID、ルート、ステータス）、監査ログを D1/DynamoDB に保存（既定 400 日）、CloudWatch アラーム（Lambda エラー/スロットル、API 5xx、WAF ブロック急増）、拒否件数のメトリクスフィルタ、AWS Budget。Cloudflare は Workers Observability | — |
+| 権限のない人の取得 | マニフェストと鍵は GitHub API でしか取れず、読めなければ 404。ストレージは鍵なしでは拒否 | `tests/flow.rs` `no_read_access_means_no_pack`、`python/tests/test_e2e.py` |
+| GitHub トークンの漏洩（ストレージ側へ） | トークンは GitHub API のホストにだけ送る。asset のリダイレクト先（別ホスト）には `Authorization` を付けない（reqwest がオリジンをまたぐリダイレクトで除去）。S3 には SigV4 だけ | `tests/flow.rs`（リダイレクト先で Authorization なしを要求）、E2E の `leaked == []` |
+| ストレージ上のファイルの改ざん・取り違え | マニフェストの SHA-256 / サイズを照合。不一致なら一時ファイルを削除しエラー（`checksum_mismatch`） | `tampered_downloads_are_discarded` |
+| マニフェストと中身の食い違い | 展開後の `carla-pack.json` の名前・バージョン・base release・platform がマニフェストと一致しなければ拒否 | `tests/pack.rs` |
+| 悪意ある tarball（`..`、絶対パス、リンク、未記載ファイル、重複メンバー） | 単一トップフォルダの通常ファイルとディレクトリのみ受け付け、全ファイルを manifest と照合。失敗時は packs_dir に何も残さない | `tests/pack.rs` |
+| 公開リポジトリから鍵を配ってしまう | 鍵の workflow はリポジトリが Private でなければ失敗する | `templates/pack-repo/.github/workflows/*` |
+| 鍵の権限が広すぎる | R2 は `object-read-only` + prefix、AWS はセッションポリシーで `s3:GetObject` + prefix。元の権限（R2 の親トークン、AWS のロール）を超えない | — |
+| 長期鍵の流出 | 配るのは 12 時間で切れる一時鍵。発行元の秘密（Cloudflare API トークン）は Actions secret、AWS は OIDC で秘密なし | — |
+| 期限切れの鍵 | 期限まで 2 分未満の鍵は使わず、原因（workflow が止まっている）を示すエラー | `expired_or_missing_credentials_are_reported` |
+| エンドポイントの差し替え（SSRF 的な誘導） | `endpoint` は https のオリジンのみ（http は localhost だけ）、パス・クエリ・ユーザー情報を禁止。キーは正規化された相対パスのみ | `src/manifest.rs` のテスト |
+| ローカルの資格情報 | 保存するトークンは `config.json`（600）。ストレージの鍵はメモリにだけ置き、ログやエラーに出さない（`Debug` でも秘匿） | `src/sigv4.rs` のテスト |
 
-## 署名付き URL についての制約（明記事項）
+## 失効と反映の遅延
 
-- 署名付き URL の有効期限は既定で **300 秒**、設定上限も 300 秒です（`PRESIGN_TTL_SECONDS`）。
-- **URL は有効期限内であれば誰でも何度でも利用できます。** Registry は発行後の URL を失効させられません。URL を受け取ったクライアントがそれを第三者に渡せば、その第三者も期限内はダウンロードできます。URL は秘密として扱ってください。
-- ACL の変更やメンバーシップの喪失は、発行済みの URL には反映されません（最大 300 秒）。
-- S3 の場合、URL は STS の一時資格情報（15 分）で署名されます。Registry は残り 6 分未満の一時資格情報を使わないため、URL が期限前に失効することはありません。
-
-## 反映の遅延
-
-- GitHub の Org/Team メンバーシップはユーザーごとに最大 5 分キャッシュされます（`MEMBERSHIP_CACHE_SECONDS`）。Org から外れたユーザーが閲覧できなくなるまで最大 5 分 + 署名付き URL の 5 分かかります。
-- セッションは既定 8 時間です。GitHub 側で OAuth 許可を取り消すと、メンバーシップの再取得が失敗するため Org/Team 経由のアクセスは拒否されますが、Public / 本人 / User ACL のバケットはセッション期限まで閲覧できます（[status.md](status.md) 残課題）。
+- **人を外す**: Pack リポジトリ（または Team）から外せば、以後マニフェストも新しい鍵も取れません。
+  ただし **すでに取得した鍵は期限（最大 12 時間）まで有効** です。旧版の署名付き URL（5 分）より長くなります。
+- **すぐに止めたい**: 鍵の元を無効にします。
+  - R2: 一時鍵の親になっている R2 API トークンを削除 / ロール（ローテーション）します。一時鍵は親の権限を超えられないので、そこから作った一時鍵も使えなくなる想定です（**実環境では未確認**。運用前に確かめてください）。
+    新しい親トークンの access key ID を `R2_PARENT_ACCESS_KEY_ID` に設定して workflow を手動実行してください。
+  - AWS: IAM ロールの「Revoke active sessions」で、それ以前に発行したセッションを無効にできます。
+- 期限は workflow の `TTL_SECONDS` / `role-duration-seconds` で短くできます（その場合は cron も短く）。
 
 ## 残留リスク・既知の制限
 
-- **R2 の公開アクセス（r2.dev、カスタムドメイン）や、バケット前段の CDN は S3 API から検出できません。** 検証時に警告を出しています。Private バケットの所有者はこれらを無効にしておく必要があります。
-- Bearer トークンは GitHub が有効と認めるトークンであれば、この OAuth App 以外が発行したもの（PAT など）でも受け付けます。メンバーシップ確認には `read:org` が必要なので、権限が足りないトークンでは Org/Team 経由のアクセスは拒否されます。OAuth App 発行のトークンに限定する（`POST /applications/{client_id}/token` で確認）ことを検討中です。
-- Cloudflare 版で AWS S3 を使う場合、Registry は IAM ユーザーの長期アクセスキーを Worker シークレットに保持します（権限は `sts:AssumeRole` のみ）。定期ローテーションが必要です（[runbook.md](runbook.md)）。
-- `sts:AssumeRole` の対象は既定で全アカウントの全ロールです。ユーザーのロール信頼ポリシーと ExternalId（Registry 生成、バケットごと）で保護されます。ロール名規約を設けられる場合は `assumable_role_arn_pattern` を絞ってください。
-- AssumeRole の際は、ユーザーのロールが広い権限を持っていても、セッションポリシーで `s3:GetObject` / `s3:ListBucket`（対象バケットのみ）に制限します。
-- GitHub Actions のデプロイロールは PowerUserAccess + `ccpr-*` に限定した IAM 権限です。plan 用の読み取り専用ロールへの分離は未実施です。
+- **鍵はリポジトリを読める全員が取得でき、他人に渡すこともできます。** 渡された人は期限まで、そのプレフィックスの Pack をすべて読めます。
+  旧版の署名付き URL と同じ性質ですが、範囲（プレフィックス全体）と期間（12 時間）が広くなっています。
+  共有範囲の違う Pack は、リポジトリとプレフィックス（R2 なら別の親トークンでも可）を分けてください。
+- **監査ログは粗くなります。** GitHub は Release asset のダウンロード者を記録しません。ストレージのアクセスログには一時鍵の ID しか残りません。
+- **トークンの権限**: `gh auth token` や OAuth App のトークン（`repo` スコープ）は、Pack リポジトリ以外にも広い権限を持ちます。
+  carla-pack が使うのは読み取りだけですが、専用にするなら GitHub App（Contents: read-only）か fine-grained PAT（対象リポジトリの Contents: read）を使ってください。
+- **鍵の置き換えの瞬間**: `gh release upload --clobber` は削除してからアップロードするため、ごく短い間 asset が無くなります。その間の取得は「再試行してください」というエラーになります。
+- **R2 の公開アクセス**: バケットに r2.dev やカスタムドメインの公開アクセスを設定すると、この仕組みを迂回して誰でも読めます。Private 運用では無効にしてください。
+- Pack リポジトリの Write 権限を持つ人（とそのワークフロー）は、マニフェストを書き換えて別のファイルを指させることができます。SHA-256 で固定した lock ファイルを使う利用者は影響を受けません。
