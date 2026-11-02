@@ -92,7 +92,8 @@ git commit -am "NishishinjukuPack 1.2.0" && git push            # （ブラン�
 
 - `carla-pack.json` から名前・バージョン・base release・platform・マップを読み、SHA-256 とサイズを計算して `[[pack]]` を追記します（既存のコメントは残ります）。
 - 同じ `(name, version, base_release, platform)` がすでにあれば拒否します。**公開済みのリリースは変更しない**でください（中身を変えるならバージョンを上げる）。
-- 5 GiB を超えるファイルは 1 回の PUT で送れないので、`aws s3 cp` / `rclone` / `wrangler r2 object put` でアップロードしてから `--no-upload` で追記してください。
+- 64 MiB を超えるファイルはマルチパートアップロード（既定 64 MiB ごと、`--part-size-mib` で変更）で送ります。数 GB〜数百 GB の Pack もそのまま公開できます（上限は S3 / R2 の 10,000 パートで、パートサイズは自動で引き上げます）。各パートは失敗すると再試行し、それでも失敗したらアップロードを中止（abort）してマニフェストには何も追記しません。
+- 他のツール（`aws s3 cp` / `rclone` など）でアップロード済みなら `--no-upload` で追記だけできます。
 - 取り下げは該当エントリに `yanked = true` を追加します（SHA-256 で固定した lock からは引き続き取得できます）。
 
 ## 4. 確認

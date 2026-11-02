@@ -23,7 +23,7 @@
    GET .../releases/assets/{id}  ─► 302（別ホストの署名付き URL。トークンは送らない）
    ← credentials.json（読み取り専用・期限付き）
 4. GET {endpoint}/{bucket}/{prefix}{key}  （SigV4、UNSIGNED-PAYLOAD）─────────────────► 鍵の権限で判定
-   ← tarball（ストリームで SHA-256 を計算しながら保存）
+   ← tarball（ストリームで SHA-256 を計算しながら保存。切断されたら Range: bytes=N- で続きから）
 5. サイズと SHA-256 をマニフェストと照合 → キャッシュ（blobs/<sha256>.tar.gz）
 6. 展開して carla-pack.json の全ファイルを照合、名前・バージョン・base release・platform がマニフェストと一致することを確認
 7. <packs_dir>/<name> に配置 → （任意）carla.Client.mount_content_pack
@@ -95,7 +95,7 @@ yanked = false                        # 任意。true にすると選ばれな�
 | `src/github.rs` | アクセス確認: マニフェストと鍵を GitHub API から読む。404 → `no_access` |
 | `src/manifest.rs` | `carla-packs.toml` の型・検証、参照 `OWNER/REPO/PACK[@VER]`、リリースの選択 |
 | `src/sigv4.rs` | AWS Signature V4（ヘッダ署名、`UNSIGNED-PAYLOAD`）。AWS の公式テストベクタで検証 |
-| `src/s3.rs` | 1 オブジェクトの GET / HEAD / PUT（path / virtual-host 形式） |
+| `src/s3.rs` | GET（Range で再開）/ HEAD / PUT、64 MiB 超はマルチパートアップロード（失敗時は abort）。path / virtual-host 形式 |
 | `src/client.rs` | `resolve` / `find_map` / `fetch`（キャッシュと検証）/ `install` / `publish` |
 | `src/pack.rs` | tarball の安全な展開、`carla-pack.json` による全ファイル照合、配置 |
 | `src/store.rs` | トークンの探索、保存済み設定（ログイン、検索対象リポジトリ）、キャッシュの場所 |

@@ -90,3 +90,23 @@ pub fn entries(dir: &std::path::Path) -> Vec<String> {
     v.sort();
     v
 }
+
+/// `len` bytes that gzip cannot shrink (a fixed xorshift sequence).
+pub fn incompressible(len: usize) -> Vec<u8> {
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    (0..len)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 24) as u8
+        })
+        .collect()
+}
+
+/// A MiniPack whose tarball is larger than `min_len` bytes (an extra member pads it;
+/// publishing only reads the manifest).
+pub fn big_pack(min_len: usize) -> Vec<u8> {
+    let pad = incompressible(min_len);
+    mini_pack(&[("MiniPack/Content/padding.bin", Member::File(&pad))])
+}

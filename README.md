@@ -67,6 +67,8 @@ c.install(release, packs_dir)                    # 検証して <packs_dir>/<nam
 - `packs_dir` は CARLA サーバから同じパスで読める場所にしてください（パッケージの `Linux/CarlaUnreal/Packs`、`-carla-packs=<dir>`、または mount するなら任意のフォルダ）。
 - 同じ Pack（名前・バージョン・base release・platform）がインストール済みならダウンロードしません。別バージョンの置き換えは `force=True`（mount 中なら先に unmount）。
 - ダウンロードは `~/.cache/carla-pack/blobs/<sha256>.tar.gz` にキャッシュします（`CARLA_PACK_CACHE_DIR`）。
+  数 GB の Pack は、キャッシュの tarball と展開後の Pack で **サイズの約 2 倍** のディスクを使います。
+- 接続が途中で切れても、受け取った位置から Range で再開します（最大 5 回）。再開しても全体の SHA-256 で検証します。
 
 ### 設定
 

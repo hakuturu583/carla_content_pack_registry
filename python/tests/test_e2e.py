@@ -26,7 +26,7 @@ moto_server = pytest.importorskip("moto.server")
 from carla_pack_registry import CarlaPackError, Client, deploy_pack, ensure_map  # noqa: E402
 from carla_pack_registry.cli import main  # noqa: E402
 
-from .packs import mini_pack  # noqa: E402
+from .packs import big_pack, mini_pack  # noqa: E402
 
 REPO = "tier4/carla-packs"
 ALICE = "gho_alice"
@@ -339,3 +339,23 @@ def test_ensure_map_from_a_scenario_library(world: dict[str, Any]) -> None:
     with pytest.raises(CarlaPackError) as e:
         deploy_pack(f"{REPO}/MiniPack", other, sha256="0" * 64)
     assert e.value.args[1] == "not_found"
+
+
+def test_large_packs_go_up_in_parts_and_come_back_intact(world: dict[str, Any]) -> None:
+    w = world
+    body = big_pack("3.0.0", 12 * 1024 * 1024)
+    tarball = w["tmp"] / "MiniPack-3.0.0-carla-0.10.0-Linux.tar.gz"
+    tarball.write_bytes(body)
+    publisher = w["s3"]["keys"]["publisher"]
+    w["monkeypatch"].setenv("CARLA_PACK_UPLOAD_ACCESS_KEY_ID", publisher["access_key_id"])
+    w["monkeypatch"].setenv("CARLA_PACK_UPLOAD_SECRET_ACCESS_KEY", publisher["secret_access_key"])
+    # 5 MiB parts: three signed UploadPart requests, then CompleteMultipartUpload.
+    code, out, err = w["run"]("--json", "publish", str(tarball), "--manifest", str(w["manifest"]), "--part-size-mib", "5")
+    assert code == 0, err
+    assert json.loads(out)["size"] == len(body)
+
+    _vend(w, "reader")
+    w["monkeypatch"].setenv("CARLA_PACK_TOKEN", ALICE)
+    packs = w["tmp"] / "Packs"
+    pack = Client().install(f"{REPO}/MiniPack@3.0.0", packs)
+    assert pack["version"] == "3.0.0" and (packs / "MiniPack" / "Content" / "padding.bin").stat().st_size == 12 * 1024 * 1024

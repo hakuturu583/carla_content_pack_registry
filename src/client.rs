@@ -20,6 +20,10 @@ use crate::sigv4::{Credentials, hex};
 use crate::store::{self, Store, Token};
 use crate::time;
 
+/// How often a broken download is resumed (HTTP Range) before giving up.
+const DOWNLOAD_RESUMES: u32 = 5;
+const RESUME_DELAY: Duration = Duration::from_secs(2);
+
 pub(crate) fn http_client() -> Result<Http> {
     Ok(Http::builder()
         .user_agent(concat!("carla-pack/", env!("CARGO_PKG_VERSION")))
@@ -266,19 +270,37 @@ impl Client {
             let mut hasher = Sha256::new();
             let mut buf = vec![0; 1 << 20];
             let mut total = 0u64;
+            let mut resumes = 0;
             loop {
-                let n = match res.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => n,
+                let error = match res.read(&mut buf) {
+                    Ok(0) if total >= release.pack.size => break,
+                    Ok(0) => format!("the connection closed after {total} of {} bytes", release.pack.size),
+                    Ok(n) => {
+                        hasher.update(&buf[..n]);
+                        file.write_all(&buf[..n])?;
+                        total += n as u64;
+                        if total > release.pack.size {
+                            break; // reported by the size check below
+                        }
+                        continue;
+                    }
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(e.into()),
+                    Err(e) => e.to_string(),
                 };
-                hasher.update(&buf[..n]);
-                file.write_all(&buf[..n])?;
-                total += n as u64;
-                if total > release.pack.size {
-                    break;
+                // The connection ended early: carry on from where it stopped. The hash covers
+                // every byte, so a resumed download is checked like any other.
+                if resumes >= DOWNLOAD_RESUMES {
+                    return Err(Error::Usage(format!(
+                        "downloading {object_key} failed after {resumes} resumed attempts: {error}"
+                    )));
                 }
+                resumes += 1;
+                std::thread::sleep(RESUME_DELAY * resumes);
+                res = bucket.get_from(&self.http, &object_key, total)?.ok_or_else(|| {
+                    Error::Usage(format!(
+                        "downloading {object_key} broke off ({error}) and the storage cannot resume it"
+                    ))
+                })?;
             }
             file.flush()?;
             let digest = hex(&hasher.finalize());
@@ -326,6 +348,8 @@ pub struct PublishOptions {
     /// Replace an object already in the bucket under that key.
     pub overwrite: bool,
     pub description: Option<String>,
+    /// Multipart part size in bytes (default 64 MiB); files up to one part go up in one PUT.
+    pub part_size: Option<u64>,
 }
 
 /// Adds the pack `tarball` to the manifest file at `manifest_path` (a checkout of the pack
@@ -396,7 +420,7 @@ pub fn publish(
                 manifest.storage.bucket
             )));
         }
-        bucket.put_file(&http, &object_key, tarball)?;
+        bucket.put_file(&http, &object_key, tarball, opts.part_size.unwrap_or(crate::s3::DEFAULT_PART_SIZE))?;
     }
 
     #[derive(Serialize)]

@@ -172,9 +172,11 @@ impl Client {
 }
 
 /// Appends the pack `tarball` to the manifest at `manifest` and (with `upload`) uploads it with
-/// CARLA_PACK_UPLOAD_* / AWS_* credentials. Returns the new manifest entry.
+/// CARLA_PACK_UPLOAD_* / AWS_* credentials (multipart above `part_size` bytes, default
+/// 64 MiB). Returns the new manifest entry.
 #[pyfunction]
-#[pyo3(signature = (manifest, tarball, key=None, upload=true, overwrite=false, description=None))]
+#[pyo3(signature = (manifest, tarball, key=None, upload=true, overwrite=false, description=None, part_size=None))]
+#[allow(clippy::too_many_arguments)] // mirrors the Python keyword arguments
 fn publish<'py>(
     py: Python<'py>,
     manifest: PathBuf,
@@ -183,8 +185,9 @@ fn publish<'py>(
     upload: bool,
     overwrite: bool,
     description: Option<String>,
+    part_size: Option<u64>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let opts = PublishOptions { key, upload, overwrite, description };
+    let opts = PublishOptions { key, upload, overwrite, description, part_size };
     let creds = Credentials::upload_from_env();
     call(py, || core_publish(&manifest, &tarball, &opts, creds.as_ref()))
 }

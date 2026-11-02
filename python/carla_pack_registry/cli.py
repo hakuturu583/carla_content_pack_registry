@@ -253,6 +253,7 @@ def cmd_publish(args: argparse.Namespace) -> int:
         upload=not args.no_upload,
         overwrite=args.overwrite,
         description=args.description,
+        part_size=args.part_size_mib * 1024 * 1024,
     )
 
     def human() -> None:
@@ -345,6 +346,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-upload", action="store_true", help="only add the entry (you uploaded the file yourself)")
     s.add_argument("--overwrite", action="store_true", help="replace an object already stored under that key")
     s.add_argument("--description")
+    s.add_argument(
+        "--part-size-mib", type=int, default=64, metavar="MIB",
+        help="multipart upload part size (default 64; files up to one part go up in a single PUT)",
+    )
     return p
 
 
