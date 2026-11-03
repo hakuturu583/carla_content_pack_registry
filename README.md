@@ -92,12 +92,13 @@ CI では Pack リポジトリを読める fine-grained PAT か GitHub App の�
 1. Private リポジトリを作り、[templates/pack-repo/carla-packs.toml](templates/pack-repo/carla-packs.toml) を置く。配りたい相手に Read 権限を付ける。
 2. バケット（R2 / S3）と読み取り専用の鍵の発行元を用意し、[鍵のローテーション workflow](templates/pack-repo/.github/workflows/) をコピーする。
 3. `carla-pack publish <Pack>.tar.gz` でアップロードとマニフェストへの追記を行い、commit / push する。
+   アップロード先は R2 / S3（carla-pack が直接マルチパートで送る）か Hugging Face（`pip install 'carla-pack[huggingface]'`、`huggingface_hub` 経由）。
 
 ## 開発
 
 ```bash
 uv venv && . .venv/bin/activate
-uv pip install "maturin>=1.9,<2" pytest "moto[server]==5.2.5" boto3
+uv pip install "maturin>=1.9,<2" pytest "moto[server]==5.2.5" boto3 "huggingface_hub>=0.32"
 maturin develop            # Rust コアをビルドして carla_pack_registry をインストール
 cargo fmt --check && cargo clippy --all-targets --features python -- -D warnings
 cargo test                 # Rust: SigV4 の公式テストベクタ、GitHub / S3 のモックサーバでの全フロー、展開の安全性

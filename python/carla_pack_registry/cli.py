@@ -15,6 +15,7 @@ from typing import Any, Callable
 from . import _core
 from ._core import CarlaPackError, Client
 from .deploy import deploy_pack
+from .publish import publish
 
 
 class CliError(Exception):
@@ -246,7 +247,7 @@ def cmd_credentials(args: argparse.Namespace) -> int:
 
 
 def cmd_publish(args: argparse.Namespace) -> int:
-    entry = _core.publish(
+    entry = publish(
         args.manifest,
         args.tarball,
         key=args.key,

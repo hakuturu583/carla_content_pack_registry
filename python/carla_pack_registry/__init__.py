@@ -14,7 +14,8 @@ CARLA side (``deploy_pack``, ``ensure_map``).
     carla_client.load_world("NishishinjukuMap")
 """
 
-from ._core import CarlaPackError, Client, __version__, publish
+from ._core import CarlaPackError, Client, __version__
 from .deploy import deploy_pack, ensure_map
+from .publish import publish
 
 __all__ = ["CarlaPackError", "Client", "__version__", "deploy_pack", "ensure_map", "publish"]

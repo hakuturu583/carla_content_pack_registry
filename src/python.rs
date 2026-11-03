@@ -9,8 +9,12 @@ use pyo3::prelude::*;
 use serde::Serialize;
 
 use crate::auth::DeviceFlow;
-use crate::client::{Client as CoreClient, PublishOptions, Release, publish as core_publish};
+use crate::client::{
+    Client as CoreClient, PublishOptions, Release, append_entry as core_append, plan_publish as core_plan,
+    publish as core_publish,
+};
 use crate::error::{Error, Result};
+use crate::manifest::PackEntry;
 use crate::manifest::{Filter, PackRef};
 use crate::pack::InstallOptions;
 use crate::sigv4::Credentials;
@@ -192,6 +196,30 @@ fn publish<'py>(
     call(py, || core_publish(&manifest, &tarball, &opts, creds.as_ref()))
 }
 
+/// Checks that `tarball` can be published to the manifest at `manifest` and returns
+/// {entry, storage, object_key} without changing anything (the SHA-256 is computed here).
+#[pyfunction]
+#[pyo3(signature = (manifest, tarball, key=None, description=None))]
+fn plan_publish<'py>(
+    py: Python<'py>,
+    manifest: PathBuf,
+    tarball: PathBuf,
+    key: Option<String>,
+    description: Option<String>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let opts = PublishOptions { key, description, ..Default::default() };
+    call(py, || core_plan(&manifest, &tarball, &opts))
+}
+
+/// Appends an entry from plan_publish to the manifest (after its file was uploaded).
+#[pyfunction]
+fn append_entry(py: Python<'_>, manifest: PathBuf, entry: &Bound<'_, PyAny>) -> PyResult<()> {
+    let json: String = py.import("json")?.call_method1("dumps", (entry,))?.extract()?;
+    let entry: PackEntry =
+        serde_json::from_str(&json).map_err(|e| to_py(Error::Usage(format!("not a manifest entry: {e}"))))?;
+    py.detach(|| core_append(&manifest, &entry)).map_err(to_py)
+}
+
 /// GitHub device-flow login: calls `on_code(verification_uri, user_code)`, then waits
 /// for the browser step (Ctrl-C aborts). Returns the access token.
 #[pyfunction]
@@ -256,6 +284,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<Client>()?;
     m.add_function(wrap_pyfunction!(publish, m)?)?;
+    m.add_function(wrap_pyfunction!(plan_publish, m)?)?;
+    m.add_function(wrap_pyfunction!(append_entry, m)?)?;
     m.add_function(wrap_pyfunction!(device_login, m)?)?;
     m.add_function(wrap_pyfunction!(save_login, m)?)?;
     m.add_function(wrap_pyfunction!(remove_login, m)?)?;

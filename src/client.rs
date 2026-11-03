@@ -395,19 +395,20 @@ pub struct PublishOptions {
     pub part_size: Option<u64>,
 }
 
-/// Adds the pack `tarball` to the manifest file at `manifest_path` (a checkout of the pack
-/// repository) and, with `opts.upload`, uploads it with `upload_credentials` (write access to
-/// the bucket, from the environment). The manifest entry is appended, so comments survive;
-/// commit and push it to publish.
-pub fn publish(
-    manifest_path: &Path,
-    tarball: &Path,
-    opts: &PublishOptions,
-    upload_credentials: Option<&Credentials>,
-) -> Result<PackEntry> {
-    let text = fs::read_to_string(manifest_path)
-        .map_err(|e| Error::Usage(format!("cannot read {}: {e}", manifest_path.display())))?;
-    let manifest = Manifest::parse(&text, &manifest_path.display().to_string())?;
+/// A checked publication: the manifest entry for a tarball, and where it goes.
+#[derive(Debug, Clone, Serialize)]
+pub struct PublishPlan {
+    pub entry: PackEntry,
+    pub storage: Storage,
+    /// Path of the tarball in the bucket / repository (`storage.prefix` + key).
+    pub object_key: String,
+}
+
+/// Reads the pack `tarball` (manifest, SHA-256, size) and checks that it can be added to
+/// the manifest at `manifest_path`: a valid entry, and no published release with the same
+/// name, version, base release and platform. Nothing is changed.
+pub fn plan_publish(manifest_path: &Path, tarball: &Path, opts: &PublishOptions) -> Result<PublishPlan> {
+    let manifest = read_manifest_file(manifest_path)?.1;
     let pm = pack::read_manifest(tarball)?;
     let key = match &opts.key {
         Some(k) => k.clone(),
@@ -430,6 +431,17 @@ pub fn publish(
         yanked: false,
     };
     debug_assert!(is_sha256(&entry.sha256));
+    check_new_entry(&manifest, &entry)?;
+    Ok(PublishPlan { object_key: manifest.storage.object_key(&entry.key), storage: manifest.storage, entry })
+}
+
+fn read_manifest_file(path: &Path) -> Result<(String, Manifest)> {
+    let text = fs::read_to_string(path).map_err(|e| Error::Usage(format!("cannot read {}: {e}", path.display())))?;
+    let manifest = Manifest::parse(&text, &path.display().to_string())?;
+    Ok((text, manifest))
+}
+
+fn check_new_entry(manifest: &Manifest, entry: &PackEntry) -> Result<()> {
     if let Some(p) = manifest.packs.iter().find(|p| {
         p.name == entry.name
             && p.version == entry.version
@@ -445,19 +457,55 @@ pub fn publish(
     let mut check = manifest.clone();
     check.packs.push(entry.clone());
     Manifest::parse(&toml::to_string(&check).map_err(|e| Error::Usage(e.to_string()))?, "the new entry")?;
+    Ok(())
+}
 
+/// Appends `entry` (from [`plan_publish`], once its file is uploaded) to the manifest at
+/// `manifest_path`, checking again that it is new. Existing text and comments are kept.
+pub fn append_entry(manifest_path: &Path, entry: &PackEntry) -> Result<()> {
+    let (mut text, manifest) = read_manifest_file(manifest_path)?;
+    check_new_entry(&manifest, entry)?;
+    #[derive(Serialize)]
+    struct Append<'a> {
+        pack: [&'a PackEntry; 1],
+    }
+    let block = toml::to_string(&Append { pack: [entry] }).map_err(|e| Error::Usage(e.to_string()))?;
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push('\n');
+    text.push_str(&block);
+    let tmp = manifest_path.with_extension("toml.tmp");
+    fs::write(&tmp, &text)?;
+    fs::rename(&tmp, manifest_path)?;
+    Ok(())
+}
+
+/// Adds the pack `tarball` to the manifest file at `manifest_path` (a checkout of the pack
+/// repository) and, with `opts.upload`, uploads it to the S3 bucket with `upload_credentials`
+/// (write access, from the environment). The manifest entry is appended, so comments survive;
+/// commit and push it to publish. Uploads to Hugging Face are done by the Python package
+/// (`carla_pack_registry.publish`, through huggingface_hub) between [`plan_publish`] and
+/// [`append_entry`].
+pub fn publish(
+    manifest_path: &Path,
+    tarball: &Path,
+    opts: &PublishOptions,
+    upload_credentials: Option<&Credentials>,
+) -> Result<PackEntry> {
+    let plan = plan_publish(manifest_path, tarball, opts)?;
     if opts.upload {
-        let storage = match &manifest.storage {
+        let storage = match &plan.storage {
             Storage::S3(s) => s,
             Storage::HuggingFace(hf) => {
                 return Err(Error::Usage(format!(
-                    "carla-pack does not upload to Hugging Face; upload with \
-                     `hf upload {} {} {} --repo-type {}` (to revision {}), then publish with --no-upload",
+                    "uploading to Hugging Face goes through the Python package (`carla-pack publish`, or \
+                     carla_pack_registry.publish with huggingface_hub installed); or upload with \
+                     `hf upload {} {} {} --repo-type {}` and publish with --no-upload",
                     hf.repo,
                     tarball.display(),
-                    manifest.storage.object_key(&entry.key),
-                    hf.repo_type.as_str(),
-                    hf.revision
+                    plan.object_key,
+                    hf.repo_type.as_str()
                 )));
             }
         };
@@ -470,29 +518,14 @@ pub fn publish(
         })?;
         let http = http_client()?;
         let bucket = Bucket { config: storage, credentials: Some(creds) };
-        let object_key = manifest.storage.object_key(&entry.key);
-        if !opts.overwrite && bucket.head(&http, &object_key)?.is_some() {
+        if !opts.overwrite && bucket.head(&http, &plan.object_key)?.is_some() {
             return Err(Error::Usage(format!(
-                "{object_key} already exists in bucket {}; pass overwrite to replace it",
-                storage.bucket
+                "{} already exists in bucket {}; pass overwrite to replace it",
+                plan.object_key, storage.bucket
             )));
         }
-        bucket.put_file(&http, &object_key, tarball, opts.part_size.unwrap_or(crate::s3::DEFAULT_PART_SIZE))?;
+        bucket.put_file(&http, &plan.object_key, tarball, opts.part_size.unwrap_or(crate::s3::DEFAULT_PART_SIZE))?;
     }
-
-    #[derive(Serialize)]
-    struct Append<'a> {
-        pack: [&'a PackEntry; 1],
-    }
-    let block = toml::to_string(&Append { pack: [&entry] }).map_err(|e| Error::Usage(e.to_string()))?;
-    let mut out = text;
-    if !out.is_empty() && !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push('\n');
-    out.push_str(&block);
-    let tmp = manifest_path.with_extension("toml.tmp");
-    fs::write(&tmp, &out)?;
-    fs::rename(&tmp, manifest_path)?;
-    Ok(entry)
+    append_entry(manifest_path, &plan.entry)?;
+    Ok(plan.entry)
 }

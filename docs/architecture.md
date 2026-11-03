@@ -105,6 +105,7 @@ yanked = false                        # 任意。true にすると選ばれな�
 | `src/auth.rs` | GitHub デバイスフロー（client ID のみ、client secret 不要） |
 | `src/python.rs` | PyO3 バインディング（`carla_pack_registry._core`） |
 | `python/carla_pack_registry/deploy.py` | `deploy_pack` / `ensure_map`: CARLA サーバへの mount / unmount |
+| `python/carla_pack_registry/publish.py` | `publish`: 確認（Rust の `plan_publish`）→ アップロード（S3 は Rust、Hugging Face は `huggingface_hub`）→ 追記（`append_entry`） |
 | `python/carla_pack_registry/cli.py` | `carla-pack` コマンド |
 | `templates/pack-repo/` | Pack リポジトリ用のマニフェスト雛形と鍵ローテーション workflow |
 

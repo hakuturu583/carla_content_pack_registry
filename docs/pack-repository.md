@@ -82,13 +82,17 @@ rm credentials.json
 
 1. Hugging Face に公開リポジトリを作る（gated にはしない）。
 2. [templates/pack-repo/carla-packs.huggingface.toml](../templates/pack-repo/carla-packs.huggingface.toml) を `carla-packs.toml` としてコピーする。GitHub 側の Pack リポジトリも公開でよい。
-3. Pack をアップロードしてからマニフェストに追記する（carla-pack は Hugging Face へはアップロードしません）:
+3. `carla-pack publish` でアップロードとマニフェストへの追記を行う。Hub へのアップロードは Hugging Face 公式の `huggingface_hub` が行います（大きなファイルも Hub の転送方式でそのまま送れます）:
 
 ```bash
-hf upload AutowareFoundation/carla-packs NishishinjukuPack-1.2.0-carla-0.10.0-Linux.tar.gz \
-  packs/NishishinjukuPack-1.2.0-carla-0.10.0-Linux.tar.gz --repo-type dataset
-carla-pack publish NishishinjukuPack-1.2.0-carla-0.10.0-Linux.tar.gz --no-upload
+pip install 'carla-pack[huggingface]'
+hf auth login            # または HF_TOKEN（そのリポジトリへの書き込み権限を持つトークン）
+carla-pack publish NishishinjukuPack-1.2.0-carla-0.10.0-Linux.tar.gz
+git commit -am "NishishinjukuPack 1.2.0" && git push
 ```
+
+   アップロード前にすべて確認します（同じリリースの重複、同じパスの既存ファイル。後者は `--overwrite` で置き換え）。
+   アップロードに失敗した場合、マニフェストには何も追記しません。`revision` はブランチにしてください（コミットには書き込めません）。
 
 ```toml
 [storage]

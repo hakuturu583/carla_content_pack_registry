@@ -14,6 +14,7 @@ repo_type = "dataset"                     # dataset (default) or model
 revision = "main"                         # branch, tag or commit; each pack's sha256 pins its bytes anyway
 prefix = "packs/"
 
-# Upload a pack with the Hugging Face CLI, then add its entry:
-#   hf upload AutowareFoundation/carla-packs <Pack>.tar.gz packs/<Pack>.tar.gz --repo-type dataset
-#   carla-pack publish <Pack>.tar.gz --no-upload
+# Publish a pack (uploads through huggingface_hub, then adds its entry here):
+#   pip install 'carla-pack[huggingface]'
+#   hf auth login                       # or HF_TOKEN: a token with write access to the repository
+#   carla-pack publish <Pack>.tar.gz

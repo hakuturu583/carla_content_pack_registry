@@ -23,6 +23,6 @@ pub mod time;
 #[cfg(feature = "python")]
 mod python;
 
-pub use client::{Client, ClientOptions, PublishOptions, Release, publish};
+pub use client::{Client, ClientOptions, PublishOptions, PublishPlan, Release, append_entry, plan_publish, publish};
 pub use error::{Error, Result};
 pub use manifest::{Filter, PackRef};

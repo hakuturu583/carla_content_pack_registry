@@ -38,7 +38,7 @@ jobs:
       - name: Build the wheel and run the Python tests (end to end against moto's S3 with IAM auth)
         run: |
           python -m venv .venv && . .venv/bin/activate
-          pip install "maturin>=1.9,<2" "pytest>=8" "moto[server]==5.2.5" boto3
+          pip install "maturin>=1.9,<2" "pytest>=8" "moto[server]==5.2.5" boto3 "huggingface_hub>=0.32"
           maturin build --release -o dist
           pip install dist/*.whl
           carla-pack --version

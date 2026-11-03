@@ -16,6 +16,10 @@ classifiers = [
   "Environment :: Console",
 ]
 
+[project.optional-dependencies]
+# Uploading packs to the Hugging Face Hub (downloads need nothing extra).
+huggingface = ["huggingface_hub>=0.32"]
+
 [project.scripts]
 carla-pack = "carla_pack_registry.cli:main"
 
