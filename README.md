@@ -1,120 +1,126 @@
-# CARLA Content Pack Registry
+# carla-pack
 
-CARLA 用 Content Pack を発見・共有・ダウンロードするための Registry サービスです。
+CARLA 用 Content Pack を **GitHub のリポジトリ権限で配布する** ためのクライアントです。サーバはありません。
 
-- 認証は **GitHub OAuth App**。ユーザー / Organization / Team は GitHub の **数値 ID** で識別します。
-- **BYOB (Bring Your Own Bucket)**: 各 GitHub ユーザーが自分の **Cloudflare R2** または **AWS S3** バケットを登録します。Registry 運営者はストレージ料金を負担しません。
-- ファイル本体は R2/S3 から **署名付き URL（最大 5 分）で直接ダウンロード**します。Registry API はデータを中継しません。
-- 同じ Registry API（同じコード、同じ OpenAPI 契約）を **Cloudflare Workers + D1** と **AWS Lambda + API Gateway + DynamoDB** のどちらにもデプロイできます。
-- インフラは Terraform（+ Wrangler）と GitHub Actions で再現可能です。
+```
+carla-pack ──(1) GitHub API: carla-packs.toml を読む ───────────► GitHub（Private リポジトリ）
+           ──(2) GitHub API: 読み取り専用の S3 鍵を読む ─────────►   └ Release "carla-pack-credentials"
+           ──(3) SigV4 で直接ダウンロード ───────────────────────► S3 互換ストレージ（R2 / S3 / MinIO …）
+           ──(4) SHA-256 と carla-pack.json で検証 → 配置 → mount ─► CARLA サーバ
+```
 
-> **現在の状態**: 実装とローカル検証は完了していますが、**実クラウド（R2 / S3 / Workers / Lambda / 本物の GitHub OAuth App）での検証はまだ行っていません**。
-> 各 Phase のテスト結果と残課題は [docs/status.md](docs/status.md) を参照してください。
-> 指示書で起点とされた `registry-local-prototype-seaweedfs` はこのリポジトリにもセッションにも存在しなかったため、仕様書から新規に実装しています（[docs/phase0-audit.md](docs/phase0-audit.md)）。
+- **アクセス権の確認は GitHub が行います。** Pack リポジトリ（Private）を読めるユーザーだけが、
+  マニフェスト `carla-packs.toml` と、Release に置かれた読み取り専用のストレージ鍵を取得できます。読めない人には GitHub が 404 を返すだけです。
+  誰に配るかは、そのリポジトリの Read 権限（ユーザー / Team / Organization）でそのまま決まります。
+- **ファイルは S3 互換ストレージから直接** ダウンロードします（Cloudflare R2、AWS S3、MinIO、SeaweedFS など）。
+  誰に配ってもよい Pack は **Hugging Face Hub の公開リポジトリ** にも置けます（鍵不要、匿名で取得）。
+- 鍵は Pack リポジトリの GitHub Actions が **6 時間ごとに作り直す有効期限 12 時間の一時鍵** で、バケットの Pack 用プレフィックスを読むことしかできません。
+  R2 は一時認証情報 API、AWS は GitHub OIDC で発行するので、長期の鍵はどこにも保存しません。
+- ダウンロードしたファイルはマニフェストの **SHA-256 とサイズ**、さらに Pack 自身の `carla-pack.json` の全ファイルのハッシュで検証してから配置します。
+- コア（GitHub API、SigV4、ダウンロード、検証、展開）は Rust、CLI と CARLA へのマウントは Python です（PyO3 / maturin、abi3 wheel）。
+
+旧版（Cloudflare Workers / AWS Lambda の Registry サーバ）は廃止しました。その設計との違いは [docs/architecture.md](docs/architecture.md) にあります。
+
+## 使う（Pack をダウンロードする側）
+
+```bash
+pip install carla-pack-registry   # 開発中は「開発」を参照
+
+gh auth login                     # GitHub CLI のトークンをそのまま使います（GH_TOKEN / GITHUB_TOKEN / carla-pack login でも可）
+carla-pack whoami
+carla-pack repo add tier4/carla-packs     # マップ名で探すときの検索対象（CARLA_PACK_REPOS でも指定可）
+
+carla-pack ls                             # 読めるリポジトリの Pack 一覧
+carla-pack find NishishinjukuMap          # そのマップを含む Pack
+carla-pack install NishishinjukuMap --map \
+  --packs-dir /opt/carla/Linux/CarlaUnreal/Packs --mount localhost:2000
+carla-pack install tier4/carla-packs/NishishinjukuPack@1.2.0 --packs-dir ./Packs   # 参照で指定
+carla-pack pull tier4/carla-packs/NishishinjukuPack -o ./downloads               # tarball だけ取得
+```
+
+PyPI の配布名は `carla-pack-registry`、Python のモジュール名は `carla_pack_registry`、コマンド名は `carla-pack` です
+（CARLA 本体の `Util/ContentPacks/carla_pack.py` と同じ環境に入れても衝突しません）。
+
+Pack の指定は `OWNER/REPO/PACK[@VERSION]` です。バージョンを省略すると最新（`--base-release` / `--platform` で絞り込み）、
+`--sha256` を付けるとその成果物に固定します（lock ファイル用）。
+
+### Python から（シナリオライブラリへの組み込み）
+
+```python
+import typesafe_carla.carla as carla   # 公式の carla モジュールでも可
+from carla_pack_registry import Client, deploy_pack, ensure_map
+
+client = carla.Client("localhost", 2000)
+
+# サーバに無いマップだけ、読めるリポジトリから探して取得・検証・配置・mount する。あれば何もしない（None）。
+pack = ensure_map(client, "NishishinjukuMap", "/opt/carla/Linux/CarlaUnreal/Packs",
+                  repos=["tier4/carla-packs"])
+client.load_world("NishishinjukuMap")
+
+# lock ファイルの内容（参照 + SHA-256）で再現性のある取得
+deploy_pack("tier4/carla-packs/NishishinjukuPack", packs_dir, carla_client=client,
+            sha256=pack["sha256"])
+
+# 低レベル API
+c = Client()                                     # トークン・検索対象は環境 / 保存済み設定から
+release = c.find_map("NishishinjukuMap")         # {"ref", "repo", "name", "version", "sha256", "maps", ...}
+path = c.fetch(release)                          # キャッシュ（SHA-256 名）に取得して検証、パスを返す
+c.install(release, packs_dir)                    # 検証して <packs_dir>/<name> に配置（同一なら何もしない）
+```
+
+- `packs_dir` は CARLA サーバから同じパスで読める場所にしてください（パッケージの `Linux/CarlaUnreal/Packs`、`-carla-packs=<dir>`、または mount するなら任意のフォルダ）。
+- 同じ Pack（名前・バージョン・base release・platform）がインストール済みならダウンロードしません。別バージョンの置き換えは `force=True`（mount 中なら先に unmount）。
+- ダウンロードは `~/.cache/carla-pack/blobs/<sha256>.tar.gz` にキャッシュします（`CARLA_PACK_CACHE_DIR`）。
+  数 GB の Pack は、キャッシュの tarball と展開後の Pack で **サイズの約 2 倍** のディスクを使います。
+- 接続が途中で切れても、受け取った位置から Range で再開します（最大 5 回）。再開しても全体の SHA-256 で検証します。
+
+### 設定
+
+| 項目 | 方法 |
+| --- | --- |
+| GitHub トークン | `CARLA_PACK_TOKEN` → `GH_TOKEN` → `GITHUB_TOKEN` → `carla-pack login` で保存したもの → `gh auth token` の順 |
+| 検索対象のリポジトリ | `--repo`（繰り返し可）、`CARLA_PACK_REPOS`（カンマ区切り）、`carla-pack repo add` |
+| 保存場所 | `CARLA_PACK_CONFIG_DIR`（既定 `~/.config/carla-pack/config.json`、パーミッション 600） |
+| GitHub Enterprise Server | `CARLA_PACK_GITHUB_API`（例 `https://ghe.example.com/api/v3`） |
+
+`carla-pack login` は GitHub App（推奨: Contents 読み取り専用、Pack リポジトリにインストール）の client ID によるデバイスフローです
+（`--client-id` / `CARLA_PACK_GITHUB_CLIENT_ID`、OAuth App なら `--scope repo`）。`gh auth login` 済みなら不要です。
+CI では Pack リポジトリを読める fine-grained PAT か GitHub App のトークンを `CARLA_PACK_TOKEN` に渡してください
+（ワークフローの `GITHUB_TOKEN` は他のリポジトリを読めません）。
+
+## 配る（Pack リポジトリを作る側）
+
+[docs/pack-repository.md](docs/pack-repository.md) を参照してください。概要:
+
+1. Private リポジトリを作り、[templates/pack-repo/carla-packs.toml](templates/pack-repo/carla-packs.toml) を置く。配りたい相手に Read 権限を付ける。
+2. バケット（R2 / S3）と読み取り専用の鍵の発行元を用意し、[鍵のローテーション workflow](templates/pack-repo/.github/workflows/) をコピーする。
+3. `carla-pack publish <Pack>.tar.gz` でアップロードとマニフェストへの追記を行い、commit / push する。
+   アップロード先は R2 / S3（carla-pack が直接マルチパートで送る）か Hugging Face（`pip install 'carla-pack-registry[huggingface]'`、`huggingface_hub` 経由）。
+
+## 開発
+
+```bash
+uv venv && . .venv/bin/activate
+uv pip install "maturin>=1.9,<2" pytest "moto[server]==5.2.5" boto3 "huggingface_hub>=0.32"
+maturin develop            # Rust コアをビルドして carla_pack_registry をインストール
+cargo fmt --check && cargo clippy --all-targets --features python -- -D warnings
+cargo test                 # Rust: SigV4 の公式テストベクタ、GitHub / S3 のモックサーバでの全フロー、展開の安全性
+pytest                     # Python: CARLA 側（mount / unmount の順序）と、moto（IAM 認証付き S3）+ 偽 GitHub での E2E
+maturin build --release    # wheel（abi3: Python 3.10 以上で共通）
+```
+
+PyPI へのリリースは PR のラベルで行います。`release:major|minor|patch` を 1 つ付けてマージすると、バージョンの更新・タグ・GitHub Release・PyPI 公開まで
+`.github/workflows/release.yml` が行います（[docs/release.md](docs/release.md)）。
 
 ## ドキュメント
 
 | ドキュメント | 内容 |
 | --- | --- |
-| [docs/status.md](docs/status.md) | Phase ごとの実装状況・テスト結果・残課題、受け入れ条件の状況 |
-| [docs/phase0-audit.md](docs/phase0-audit.md) | Phase 0 監査（PoC 不在の記録、依存関係・ライセンス、PoC の既知課題への対応） |
-| [docs/architecture.md](docs/architecture.md) | コンポーネント構成、データモデル、認証・ダウンロードの流れ |
-| [docs/security.md](docs/security.md) | セキュリティ要件への対応表と残留リスク |
-| [docs/runbook.md](docs/runbook.md) | 環境構築、シークレット登録、デプロイ、ロールバック、バックアップ/復旧、障害対応、バケット所有者向け手順 |
-| [openapi/openapi.yaml](openapi/openapi.yaml) | API 契約（Cloudflare 版・AWS 版共通） |
-
-## 構成
-
-```
-src/
-  core/          RegistryCore（登録・ACL・認可・ダウンロード）、ポート定義、入力検証
-  identity/      GitHubIdentityProvider（OAuth / Org・Team メンバーシップ）、開発用 Mock
-  storage/       StorageProvider（S3 互換: R2 / AWS S3 / ローカル SeaweedFS）
-  credentials/   CredentialResolver（AES-GCM 暗号化、STS AssumeRole）
-  repository/    RegistryRepository（D1 / DynamoDB / テスト用メモリ）
-  http/          Hono アプリ（両ランタイム共通の API）、セッション・CSRF、簡易 UI
-  runtime/       CloudflareRuntime（Workers + D1）、AWSRuntime（Lambda + DynamoDB）、設定
-migrations/      D1 スキーマ
-openapi/         OpenAPI 3.1
-infra/           Terraform（cloudflare / aws / aws/bootstrap）
-deploy/          wrangler 設定（ローカル用・環境別テンプレート）
-local/           Docker Compose（SeaweedFS、DynamoDB Local）
-cli/             carla-pack CLI（Rust コア + Python フロントエンド、PyO3 / maturin）
-.github/         CI とデプロイワークフロー
-```
-
-## ローカル開発（Wrangler + D1 Local + SeaweedFS + Mock 認証）
-
-前提: Node.js 22.13 以上、Docker（Compose v2）。
-
-```bash
-npm ci
-npm run dev:storage                 # SeaweedFS (127.0.0.1:8333) を起動
-npm run dev:seed                    # ローカル用バケットとサンプル Content Pack を作成
-node scripts/gen-dev-vars.mjs       # deploy/cloudflare/.dev.vars（暗号鍵）を生成
-npm run db:migrate:local            # D1 Local にスキーマ適用
-npm run dev                         # http://localhost:8787
-```
-
-ブラウザで http://localhost:8787 を開き、「Sign in with GitHub」から Mock ユーザーを選択します。
-
-| Mock ユーザー | GitHub ID | 所属 |
-| --- | --- | --- |
-| alice | 1001 | org `carla-sim`（team `maps`）、org `other-lab` |
-| bob | 1002 | org `carla-sim`（team `vehicles`） |
-| carol | 1003 | なし |
-
-SeaweedFS にはユーザーごとに別々のアクセスキーを設定しています（共通の開発用資格情報はありません）。
-`alice-packs` は alice のキーでのみ、`bob-packs` は bob のキーでのみ読めます。`exposed-packs` は匿名読み取りが有効で、Private 登録時の公開検出を確認するためのものです。
-
-### CLI（`carla-pack`）
-
-Rust コア + Python フロントエンドの CLI が `cli/` にあります（詳細は [cli/README.md](cli/README.md)）。
-
-```bash
-cd cli && uv venv && . .venv/bin/activate && uv pip install maturin && maturin develop
-carla-pack login --token mock:alice           # ローカル（Mock）。本番 Registry では `carla-pack login`（GitHub デバイスフロー）
-export CARLA_PACK_SECRET_ACCESS_KEY=local-alice-secret-not-for-production
-carla-pack bucket add alice-maps --provider local --bucket alice-packs --access-key-id LOCALALICEKEY00001
-carla-pack bucket verify alice/alice-maps
-carla-pack acl add alice/alice-maps --team carla-sim/maps
-carla-pack ls alice/alice-maps
-carla-pack pull alice/alice-maps maps/ -o ./packs
-carla-pack install alice/alice-maps packs/<Pack>-<ver>-<release>.tar.gz --packs-dir <package>/Linux/CarlaUnreal/Packs --mount localhost:2000   # CARLA の carla_pack.py で作った pack をバケットに置いた場合
-```
-
-curl で直接呼ぶ場合は `Authorization: Bearer mock:<login>` を付けます（例: `curl -H 'authorization: Bearer mock:alice' http://localhost:8787/v1/buckets`）。
-
-本物の GitHub OAuth App をローカルで試す場合は `.dev.vars` に `AUTH_MODE="github"` と `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` を設定し、OAuth App の Callback URL を `http://localhost:8787/login/github/callback` にします。
-
-Mock 認証は `ENVIRONMENT=local` 以外では起動時に拒否されます（設定エラーとして全リクエストが 500 になります）。
-
-## テスト
-
-```bash
-npm run typecheck && npm run lint
-npm test                            # ユニット + API 契約テスト（Memory / D1(SQLite) / Fake S3）
-docker compose -f local/docker-compose.yml --profile aws up -d --wait   # SeaweedFS + DynamoDB Local
-npm run dev:seed
-npm run test:integration            # Worker エントリ + D1、Lambda ハンドラ + DynamoDB Local、実 SeaweedFS
-SMOKE_BASE_URL=http://localhost:8787 SMOKE_TOKEN=mock:alice SMOKE_LOCAL_FLOW=1 npm run smoke   # wrangler dev に対して
-(cd cli && cargo test && pytest)    # CLI: Rust コア（モックサーバー）と CLI の E2E（wrangler dev に対して）
-```
-
-`test/helpers/scenarios.ts` の API 契約シナリオ（Alice/Bob/Carol による Public / Private / User / Org / Team ACL、所有者限定操作、公開検出、署名付きダウンロードなど）を、
-インプロセス（Memory, D1）、Cloudflare Worker エントリ、AWS Lambda ハンドラのすべてで同一に実行し、Cloudflare 版と AWS 版が同じ API・認可動作になることを確認しています。
-
-## デプロイ
-
-概要のみ記載します。手順の詳細・前提（承認、費用、資格情報の登録）は [docs/runbook.md](docs/runbook.md) を参照してください。
-**このリポジトリの作業ではクラウドリソースの作成・デプロイは一切行っていません。**
-
-- Cloudflare: `infra/cloudflare`（D1 / DNS / WAF / Bot 対策 / 任意で STS 用 IAM ユーザー）を Terraform で適用 → `scripts/render-wrangler.mjs` で wrangler 設定を生成 → D1 マイグレーション → `wrangler deploy` → スモークテスト。
-- AWS: `infra/aws/bootstrap`（state バケット、GitHub OIDC デプロイロール）を一度だけ適用 → `infra/aws`（API Gateway REST / Lambda / DynamoDB / WAF / Secrets Manager / CloudWatch / Budget）を Terraform で適用 → スモークテスト。
-- GitHub Actions: `.github/workflows/deploy-cloudflare.yml` / `deploy-aws.yml`（`workflow_dispatch`、plan → 承認付き環境で apply → デプロイ → スモークテスト）。
-- CLI（PyPI の `carla-pack-registry`）: PR に `release:major|minor|patch` ラベルを 1 つ付けてマージすると、バージョンの更新・タグ・GitHub Release・PyPI 公開まで `.github/workflows/release.yml` が行います（[docs/runbook.md](docs/runbook.md#8-cli-のリリースpypi)）。
-- 各ユーザー所有の R2/S3 バケットは運営側 Terraform の管理対象外です。
+| [docs/architecture.md](docs/architecture.md) | 仕組み、マニフェストと鍵ファイルの形式、旧 Registry サーバとの違い |
+| [docs/security.md](docs/security.md) | 信頼の境界、失効、残留リスク |
+| [docs/pack-repository.md](docs/pack-repository.md) | Pack リポジトリの作り方（R2 / AWS / その他の S3 互換） |
+| [docs/release.md](docs/release.md) | `carla-pack-registry` の PyPI リリース手順（ラベル駆動、Trusted Publishing） |
 
 ## ライセンス
 
-[Apache License 2.0](LICENSE) です。依存関係のライセンスは [docs/phase0-audit.md](docs/phase0-audit.md) を参照してください。
+[Apache License 2.0](LICENSE) です。

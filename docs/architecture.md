@@ -1,96 +1,122 @@
 # アーキテクチャ
 
-## コンポーネント
+## 考え方
 
-指示書の主要コンポーネントとコードの対応です。業務ロジック（`src/core`）は Cloudflare / AWS / GitHub の型や API に依存せず、すべて `src/core/ports.ts` のインターフェース経由で外部に触れます。
+「この人はこの Pack をダウンロードしてよいか」を判断する主体を、自前のサーバから **GitHub のリポジトリ権限** に移しました。
 
-| 指示書のコンポーネント | 実装 |
+- Pack リポジトリ（GitHub、Private）を読める ⇔ その Pack を取得できる。
+- そのために必要な情報（どこに・どの SHA-256 で置いてあるか、読み取り用の鍵）は、すべてリポジトリの中に置く。
+- クライアントは利用者自身の GitHub トークンでそれを読み、ストレージから直接ダウンロードする。
+
+中央のサーバ・データベース・秘密情報の保管場所はありません。
+
+## 流れ
+
+```
+利用者の carla-pack / Python                 GitHub                          S3 互換ストレージ
+──────────────────────────                  ──────                          ────────────────
+1. GET /repos/{o}/{r}/contents/carla-packs.toml ─► 読めなければ 404（終了）
+   ← マニフェスト（storage と [[pack]]）
+2. 参照（OWNER/REPO/PACK@VER）またはマップ名から
+   リリースを 1 つに決める（新しい順、曖昧ならエラー）
+3. GET /repos/{o}/{r}/releases/tags/carla-pack-credentials
+   GET .../releases/assets/{id}  ─► 302（別ホストの署名付き URL。トークンは送らない）
+   ← credentials.json（読み取り専用・期限付き）
+4. GET {endpoint}/{bucket}/{prefix}{key}  （SigV4、UNSIGNED-PAYLOAD）─────────────────► 鍵の権限で判定
+   ← tarball（ストリームで SHA-256 を計算しながら保存。切断されたら Range: bytes=N- で続きから）
+5. サイズと SHA-256 をマニフェストと照合 → キャッシュ（blobs/<sha256>.tar.gz）
+6. 展開して carla-pack.json の全ファイルを照合、名前・バージョン・base release・platform がマニフェストと一致することを確認
+7. <packs_dir>/<name> に配置 → （任意）carla.Client.mount_content_pack
+```
+
+鍵を作る側（Pack リポジトリの GitHub Actions、6 時間ごと）:
+
+```
+R2:  Cloudflare API（secret の API トークン）→ POST /accounts/{id}/r2/temp-access-credentials
+     （object-read-only、prefix 限定、12 時間）
+AWS: GitHub OIDC → sts:AssumeRoleWithWebIdentity（12 時間、セッションポリシーで s3:GetObject と prefix に限定）
+→ credentials.json を Release "carla-pack-credentials" の asset として置き換える（Private でなければ中止）
+```
+
+## 形式
+
+### `carla-packs.toml`（Pack リポジトリのルート）
+
+```toml
+schema = 1
+
+[storage]
+endpoint = "https://<account>.r2.cloudflarestorage.com"   # https のみ（http は localhost だけ）。パスなしのオリジン
+region = "auto"                                          # 既定 auto（R2）。S3 はバケットのリージョン
+bucket = "carla-packs"
+prefix = "packs/"                                        # 任意。"/" で終わる相対パス
+addressing = "path"                                      # path（既定）| virtual
+credentials = "github-release"                           # github-release | anonymous（公開バケット）
+credentials_tag = "carla-pack-credentials"               # 任意
+# type = "s3" は省略可（既定）。公開 Pack を Hugging Face に置く場合:
+# type = "huggingface" / repo = "OWNER/NAME" / repo_type = "dataset" | "model" / revision = "main" / prefix
+
+[[pack]]
+name = "NishishinjukuPack"            # CARLA の Pack 名（英字始まりの英数字と _）
+version = "1.2.0"
+base_release = "carla-0.10.0-Linux"
+platform = "Linux"
+key = "NishishinjukuPack-1.2.0-carla-0.10.0-Linux.tar.gz"   # prefix からの相対キー
+sha256 = "…"                          # tarball の SHA-256（小文字 16 進 64 桁）
+size = 3221225472
+maps = ["NishishinjukuMap"]
+description = "…"                     # 任意
+yanked = false                        # 任意。true にすると選ばれない（sha256 で固定した lock からは取得可）
+```
+
+- 未知のキーはエラーにします（タイプミスの見逃し防止）。
+- `(name, version, base_release, platform)` の重複はエラー。`carla-pack publish` は既存のものを置き換えず追記だけします。
+- 選択: 条件（名前・バージョン・base release・platform・sha256）に合うもののうち最新版。最新版が複数の base release / platform にあれば曖昧としてエラー。
+  バージョンは区切り（`.` `-` `+` `_`）ごとに数値比較し、`1.0.0` は `1.0.0-rc1` より新しいとみなします。
+- マップ名は `/Game/.../Town01` のようなパスでも末尾の名前で照合します。
+
+### `credentials.json`（Release asset）
+
+```json
+{
+  "version": 1,
+  "access_key_id": "…",
+  "secret_access_key": "…",
+  "session_token": "…",
+  "expires_at": "2026-11-03T00:00:00Z"
+}
+```
+
+`session_token` と `expires_at` は任意（長期鍵の場合は省略）。`expires_at` は RFC 3339（オフセット付きも可）。
+期限まで 2 分を切った鍵は使わず、「鍵の workflow が動いていない」というエラーにします。
+
+## コード
+
+| ファイル | 役割 |
 | --- | --- |
-| RegistryCore | `src/core/registry.ts`（登録・更新・削除、ACL、検証、一覧、ダウンロード）、`src/core/authz.ts`（純粋関数の認可規則）、`src/core/validation.ts` |
-| GitHubIdentityProvider | `src/identity/github.ts`（OAuth Web フロー + PKCE、`/user`、`/user/memberships/orgs`、`/user/teams`、名前→数値 ID 解決）。開発用は `src/identity/mock.ts` |
-| RegistryRepository | `src/repository/d1.ts`（D1）、`src/repository/dynamodb.ts`（DynamoDB 単一テーブル）、`src/repository/memory.ts`（テスト用） |
-| StorageProvider | `src/storage/s3compat.ts`（R2 / AWS S3 / SeaweedFS 共通。ListObjectsV2、HeadObject、署名付き GET、検証） |
-| CredentialResolver | `src/credentials/resolver.ts`（R2: 暗号化した静的キーの復号、S3: STS AssumeRole + ExternalId + セッションポリシー） |
-| CloudflareRuntime | `src/runtime/cloudflare.ts`（Workers の `fetch` / `scheduled`、D1、Workers Rate Limiting バインディング） |
-| AWSRuntime | `src/runtime/aws.ts`（API Gateway REST → Lambda、DynamoDB、Secrets Manager、DynamoDB によるレート制限） |
-| CLI | `cli/`（Rust コア `carla_pack_registry`: API クライアント・デバイスフロー・トークン保存・ダウンロード・Content Pack の検証付きインストール。Python フロントエンド `carla_pack_registry.cli`: 引数解析と表示、`carla_pack_registry.deploy_pack`: CARLA サーバへのマウント） |
-| HTTP API（共通） | `src/http/app.ts`（Hono）、`src/http/auth.ts`（セッション、CSRF、OAuth state） |
+| `src/github.rs` | アクセス確認: マニフェストと鍵を GitHub API から読む。404 → `no_access` |
+| `src/manifest.rs` | `carla-packs.toml` の型・検証、参照 `OWNER/REPO/PACK[@VER]`、リリースの選択 |
+| `src/sigv4.rs` | AWS Signature V4（ヘッダ署名、`UNSIGNED-PAYLOAD`）。AWS の公式テストベクタで検証 |
+| `src/hf.rs` | Hugging Face の公開リポジトリからの取得（匿名の `resolve` URL、Range で再開） |
+| `src/s3.rs` | GET（Range で再開）/ HEAD / PUT、64 MiB 超はマルチパートアップロード（失敗時は abort）。path / virtual-host 形式 |
+| `src/client.rs` | `resolve` / `find_map` / `fetch`（キャッシュと検証）/ `install` / `publish` |
+| `src/pack.rs` | tarball の安全な展開、`carla-pack.json` による全ファイル照合、配置 |
+| `src/store.rs` | トークンの探索、保存済み設定（ログイン、検索対象リポジトリ）、キャッシュの場所 |
+| `src/auth.rs` | GitHub デバイスフロー（client ID のみ、client secret 不要） |
+| `src/python.rs` | PyO3 バインディング（`carla_pack_registry._core`） |
+| `python/carla_pack_registry/deploy.py` | `deploy_pack` / `ensure_map`: CARLA サーバへの mount / unmount |
+| `python/carla_pack_registry/publish.py` | `publish`: 確認（Rust の `plan_publish`）→ アップロード（S3 は Rust、Hugging Face は `huggingface_hub`）→ 追記（`append_entry`） |
+| `python/carla_pack_registry/cli.py` | `carla-pack` コマンド |
+| `templates/pack-repo/` | Pack リポジトリ用のマニフェスト雛形と鍵ローテーション workflow |
 
-```
-            Browser / CARLA CLI
-                    │
-      Cloudflare WAF │ AWS WAF (API Gateway REST ステージに関連付け)
-                    │
-   ┌────────────────┴─────────────────┐
-   │ runtime/cloudflare.ts │ runtime/aws.ts │  ← 設定読込・アダプタ生成のみ
-   └────────────────┬─────────────────┘
-                    │ runtime/services.ts（共通の組み立て）
-              http/app.ts（同一 API）
-                    │
-              core/RegistryCore ──── IdentityProvider ── GitHub API
-                    │                 RateLimiter
-                    ├── RegistryRepository ── D1 | DynamoDB
-                    ├── CredentialResolver ── Keyring(AES-GCM) | STS AssumeRole
-                    └── StorageProvider ───── R2 | S3 | SeaweedFS (S3 API, SigV4)
-                                                   ↑
-                    クライアントは署名付き URL で直接ダウンロード
-```
+## 旧 Registry サーバ（Workers / Lambda）との違い
 
-## 4 つの組み合わせ
-
-Registry の配置先とユーザーのストレージは独立しています。どちらのランタイムでも同じ `S3CompatibleStorageFactory` と `DefaultCredentialResolver` を使い、違いは「Registry 自身の AWS プリンシパルの資格情報をどこから得るか」だけです。
-
-| Registry | ストレージ | 資格情報の流れ |
+| | 旧: Registry サーバ | 新: GitHub + S3 直接 |
 | --- | --- | --- |
-| Workers | R2 | D1 上の暗号化キーを復号 → `https://<account>.r2.cloudflarestorage.com/<bucket>` に SigV4 |
-| Workers | S3 | Worker シークレットの IAM ユーザーキーで `sts:AssumeRole`（ExternalId 付き）→ 一時資格情報で S3 |
-| Lambda | R2 | DynamoDB 上の暗号化キーを復号（鍵は Secrets Manager）→ R2 |
-| Lambda | S3 | Lambda 実行ロールで `sts:AssumeRole` → S3 |
-
-## データモデル
-
-- **User**: GitHub 数値 ID、login（表示用）。
-- **Bucket**: UUID、`ownerId`（GitHub ユーザー ID、変更不可）、名前、説明、`visibility`（public/private）、ストレージ設定（秘密情報なし）、暗号化済み資格情報（R2/local のみ）、検証状態。
-- **ACL エントリ**: `(type, id, name)`。`type` は `user` / `org` / `team`、`id` は GitHub 数値 ID、`name` は書き込み時点の表示名。
-- **Session**: Cookie 値の SHA-256、ユーザー ID、暗号化した GitHub トークン、CSRF トークン、有効期限（既定 8 時間）。
-- **Membership cache**: ユーザーごとの org/team ID 一覧（既定 5 分）。
-- **Audit log**: 時刻、操作者、操作、バケット、結果（ok/allow/deny/error）、詳細。
-
-D1 は `migrations/0001_init.sql`、DynamoDB は `src/repository/dynamodb.ts` 冒頭のキー設計（GSI1: 所有者・ACL 主体、GSI2: Public バケット）を参照してください。
-
-## 認可
-
-`src/core/authz.ts`:
-
-1. 所有者 → 常に許可（閲覧・管理）
-2. Public バケット → ログイン済みの全 GitHub ユーザーが閲覧可
-3. Private バケット → ACL のいずれかに一致すれば閲覧可
-   - `user`: 閲覧者の GitHub ID と一致
-   - `org`: 閲覧者の **active** な Organization メンバーシップに含まれる
-   - `team`: 閲覧者の Team メンバーシップに含まれる
-4. 管理操作（設定更新、ACL、資格情報、検証、登録解除）は所有者のみ
-5. GitHub がメンバーシップを確認できない場合（API 失敗、`read:org` 不足、Org が OAuth App を未承認、レート制限）は **拒否**
-6. 閲覧できない Private バケットは 404 を返し、存在を開示しない
-
-ACL の書き込み時は、所有者のトークンで login / slug を数値 ID に解決して保存します（名前の変更・再利用の影響を受けません）。
-
-## 認証の流れ
-
-- **ブラウザ**: `/login/github` → GitHub（`state` と PKCE `code_challenge`、スコープ `read:org`）→ `/login/github/callback` で state を Cookie と照合し、`code_verifier` 付きでトークン交換 → セッション Cookie（`__Host-` 接頭辞、HttpOnly、Secure、SameSite=Lax）。
-- **CLI（`carla-pack`）**: `GET /cli/config` で OAuth App の client ID を取得し、GitHub のデバイスフロー（スコープ `read:org`）でトークンを取得します。以降は `Authorization: Bearer <GitHub OAuth トークン>` で API を呼びます（Bearer リクエストは CSRF の対象外）。トークンは CLI の設定ディレクトリ（パーミッション 600）に保存します。ダウンロードは署名付き URL から直接行い、Registry のトークンはストレージに送りません。
-- **CSRF**: Cookie セッションでの POST/PUT/PATCH/DELETE は `X-CSRF-Token`（`/v1/me` で取得）必須。`Origin` ヘッダーがある場合は自オリジンのみ許可。
-
-## ダウンロードの流れ
-
-1. クライアント → `GET /v1/buckets/{id}/objects/{key}/download`
-2. Registry が GitHub ユーザーを認証（セッションまたは Bearer）
-3. ACL を判定（必要なら GitHub の Org/Team メンバーシップを確認、5 分キャッシュ）
-4. バケットが検証済みであることを確認し、HeadObject で存在確認
-5. 有効期限 300 秒以下の署名付き GET URL を返す（`?redirect=1` なら 302）
-6. クライアントは R2/S3 から直接ダウンロード
-
-## バケット登録と検証
-
-1. `POST /v1/buckets` — R2 はアカウント ID・バケット名・バケット限定トークン、S3 はリージョン・バケット名・ロール ARN。S3 の場合 Registry が ExternalId を生成し、所有者にだけ `awsTrust`（信頼すべきプリンシパル ARN と ExternalId）を返します。
-2. `POST /v1/buckets/{id}/verify` — 一覧・HeadObject ができること、Private の場合は匿名の一覧・読み取りが拒否されることを確認。ListBuckets が成功する（＝バケット限定でない）資格情報には警告を出します。
-3. 検証済みになるまで、オブジェクト一覧とダウンロードは 409 `not_verified` です。Public → Private への変更や資格情報の更新で未検証に戻ります。
+| アクセス判定 | サーバが GitHub の Org / Team メンバーシップを引いて ACL を判定 | GitHub がリポジトリの Read 権限で判定（読めなければ 404） |
+| 共有の単位 | バケット単位の ACL（user / org / team） | リポジトリ（とバケットのプレフィックス）単位。Team 単位で配るならリポジトリに Team を追加 |
+| ダウンロード | サーバが署名した 5 分の URL | 利用者が 12 時間の読み取り専用鍵で SigV4 署名 |
+| 秘密情報 | サーバが全バケットの鍵（暗号化）と STS 用 IAM キーを保持 | 中央には無い。鍵の元（Cloudflare API トークン / OIDC ロール）は各 Pack リポジトリの Actions にだけある |
+| 一覧 | バケットのライブ一覧 | マニフェストに明示的に公開したものだけ（SHA-256 固定、不変） |
+| 運用 | Workers + D1 または Lambda + DynamoDB、WAF、Terraform | なし（各 Pack リポジトリの scheduled workflow のみ） |
+| 監査 | サーバの監査ログ | GitHub の権限変更履歴とストレージのアクセスログ（鍵 ID 単位） |

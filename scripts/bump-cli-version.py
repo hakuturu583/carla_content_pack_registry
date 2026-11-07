@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Bumps the version of the carla-pack-registry Python package (the CLI in cli/).
+"""Bumps the version of the carla-pack-registry Python package (the carla-pack CLI).
 
-The version has one source, `[package] version` in cli/Cargo.toml: cli/pyproject.toml
-declares it dynamic and maturin reads it from there. cli/Cargo.lock repeats it for the
+The version has one source, `[package] version` in Cargo.toml: pyproject.toml
+declares it dynamic and maturin reads it from there. Cargo.lock repeats it for the
 crate itself and `cargo --locked` rejects a lock that disagrees, so both are rewritten
 together. The release workflow calls this; editing them by hand is how they drift.
 
@@ -21,9 +21,9 @@ import re
 import sys
 from pathlib import Path
 
-CLI = Path(__file__).resolve().parent.parent / "cli"
-CARGO_TOML = CLI / "Cargo.toml"
-CARGO_LOCK = CLI / "Cargo.lock"
+ROOT = Path(__file__).resolve().parent.parent
+CARGO_TOML = ROOT / "Cargo.toml"
+CARGO_LOCK = ROOT / "Cargo.lock"
 PACKAGE = re.compile(r'(?m)(^\[package\][^\[]*?^version = )"([^"]+)"')
 
 

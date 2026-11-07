@@ -1,8 +1,8 @@
-# Cuts releases of the carla-pack-registry Python package (the CLI in cli/) and
+# Cuts releases of the carla-pack-registry Python package (the carla-pack CLI) and
 # publishes them to PyPI. The mechanism is simple_lanelet2's (itself from tier4/splatsim).
 #
 #   push to main   when the merged PR carries exactly one `release:major|minor|patch`
-#                  label, the `release` job bumps cli/Cargo.toml + cli/Cargo.lock,
+#                  label, the `release` job bumps Cargo.toml + Cargo.lock,
 #                  commits, tags `vX.Y.Z`, creates the GitHub release, and the same run
 #                  builds, tests and publishes that tag. No label: nothing happens.
 #   push a v* tag  a hand-cut tag (a hotfix, say) is built and published directly.
@@ -18,10 +18,8 @@
 # configured once on PyPI (pending publisher: owner `hakuturu583`, repository
 # `carla_content_pack_registry`, workflow `release.yml`, environment `pypi`); until then
 # the publish job fails and the artifacts stay downloadable from the run. See
-# docs/runbook.md. A version can never be replaced on PyPI, so the tagged commit is
+# docs/release.md. A version can never be replaced on PyPI, so the tagged commit is
 # tested again here rather than trusting CI on the merge.
-#
-# Tags and versions are the CLI's; the registry service is deployed separately.
 
 name: Release
 
@@ -33,11 +31,11 @@ on:
     paths:
       - .github/workflows/release.yml
       - scripts/bump-cli-version.py
-      - cli/Cargo.toml
-      - cli/Cargo.lock
-      - cli/pyproject.toml
-      - cli/LICENSE
-      - cli/README.md
+      - Cargo.toml
+      - Cargo.lock
+      - pyproject.toml
+      - LICENSE
+      - README.md
   workflow_dispatch:
 
 permissions:
@@ -96,7 +94,7 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: bump cli/Cargo.toml and cli/Cargo.lock together
+      - name: bump Cargo.toml and Cargo.lock together
         if: steps.pr.outputs.bump != 'none'
         id: bump
         run: |
@@ -119,7 +117,7 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add cli/Cargo.toml cli/Cargo.lock
+          git add Cargo.toml Cargo.lock
           git commit -m "chore(release): ${{ steps.bump.outputs.tag }}"
           git tag -a "${{ steps.bump.outputs.tag }}" -m "Release ${{ steps.bump.outputs.tag }}"
           git push origin "HEAD:main"
@@ -183,9 +181,6 @@ jobs:
     # downstream unless the condition says otherwise -- hence `!cancelled()`.
     if: ${{ !cancelled() && needs.resolve.result == 'success' && needs.resolve.outputs.proceed == 'true' }}
     runs-on: ubuntu-24.04
-    defaults:
-      run:
-        working-directory: cli
     steps:
       - uses: actions/checkout@v5
         with:
@@ -195,10 +190,9 @@ jobs:
         env:
           TAG: ${{ needs.resolve.outputs.version }}
         run: |
-          PKG=$(python3 ../scripts/bump-cli-version.py --show)
+          PKG=$(python3 scripts/bump-cli-version.py --show)
           echo "tag=$TAG package=$PKG"
           test "$TAG" = "$PKG"
-      - run: cmp ../LICENSE LICENSE
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -228,29 +222,29 @@ jobs:
           ref: ${{ needs.resolve.outputs.ref }}
       - uses: PyO3/maturin-action@v1
         with:
-          working-directory: cli
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
           args: --release --locked --out dist
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      # The artifact itself, installed clean: the command, the import and the offline
-      # tests (the registry-backed ones skip without a registry).
+      # The artifact itself, installed clean: the command, the import and the Python
+      # tests. The end-to-end (moto) and Hugging Face tests skip without their extras;
+      # ci.yml runs them on every PR.
       - name: test the wheel that is about to be published
         shell: bash
         run: |
           python -m venv "$RUNNER_TEMP/fresh"
           PY="$RUNNER_TEMP/fresh/bin/python"
           [ -x "$PY" ] || PY="$RUNNER_TEMP/fresh/Scripts/python.exe"
-          "$PY" -m pip install --quiet cli/dist/*.whl "pytest>=8"
+          "$PY" -m pip install --quiet dist/*.whl "pytest>=8"
           "$PY" -m carla_pack_registry --version
-          "$PY" -c "import carla_pack_registry as m; assert m.deploy_pack and m.Client; print(m.__version__)"
-          cd cli && "$PY" -m pytest -q python/tests
+          "$PY" -c "import carla_pack_registry as m; assert m.deploy_pack and m.Client and m.publish; print(m.__version__)"
+          "$PY" -m pytest -q -p no:cacheprovider python/tests
       - uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ matrix.os }}-${{ matrix.target }}
-          path: cli/dist/*.whl
+          path: dist/*.whl
 
   sdist:
     name: sdist
@@ -263,7 +257,6 @@ jobs:
           ref: ${{ needs.resolve.outputs.ref }}
       - uses: PyO3/maturin-action@v1
         with:
-          working-directory: cli
           command: sdist
           args: --out dist
       # The sdist is what lets other platforms build from source, so it is built once
@@ -274,12 +267,12 @@ jobs:
       - name: build and import a wheel from the sdist
         run: |
           python -m venv "$RUNNER_TEMP/fresh"
-          "$RUNNER_TEMP/fresh/bin/python" -m pip install --quiet cli/dist/*.tar.gz
+          "$RUNNER_TEMP/fresh/bin/python" -m pip install --quiet dist/*.tar.gz
           "$RUNNER_TEMP/fresh/bin/carla-pack" --version
       - uses: actions/upload-artifact@v4
         with:
           name: sdist
-          path: cli/dist/*.tar.gz
+          path: dist/*.tar.gz
 
   publish:
     name: publish to PyPI
