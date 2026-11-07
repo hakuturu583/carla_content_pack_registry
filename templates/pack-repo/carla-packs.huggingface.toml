@@ -1,0 +1,20 @@
+# carla-pack manifest for PUBLIC packs stored on the Hugging Face Hub.
+# Copy to the root of a pack repository as carla-packs.toml.
+#
+# Everyone can download these packs (the Hugging Face repository is public), so the
+# pack repository on GitHub may be public too, and no credential workflow is needed.
+# For packs that must stay private, use an S3-compatible bucket instead
+# (carla-packs.toml in this directory).
+schema = 1
+
+[storage]
+type = "huggingface"
+repo = "AutowareFoundation/carla-packs"   # OWNER/NAME on huggingface.co
+repo_type = "dataset"                     # dataset (default) or model
+revision = "main"                         # branch, tag or commit; each pack's sha256 pins its bytes anyway
+prefix = "packs/"
+
+# Publish a pack (uploads through huggingface_hub, then adds its entry here):
+#   pip install 'carla-pack[huggingface]'
+#   hf auth login                       # or HF_TOKEN: a token with write access to the repository
+#   carla-pack publish <Pack>.tar.gz
