@@ -85,7 +85,7 @@ rm credentials.json
 3. `carla-pack publish` でアップロードとマニフェストへの追記を行う。Hub へのアップロードは Hugging Face 公式の `huggingface_hub` が行います（大きなファイルも Hub の転送方式でそのまま送れます）:
 
 ```bash
-pip install 'carla-pack[huggingface]'
+pip install 'carla-pack-registry[huggingface]'
 hf auth login            # または HF_TOKEN（そのリポジトリへの書き込み権限を持つトークン）
 carla-pack publish NishishinjukuPack-1.2.0-carla-0.10.0-Linux.tar.gz
 git commit -am "NishishinjukuPack 1.2.0" && git push

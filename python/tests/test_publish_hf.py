@@ -108,6 +108,6 @@ def test_no_upload_only_appends(hub: dict[str, Any], repo: dict[str, Path]) -> N
 
 def test_without_huggingface_hub_the_error_says_what_to_install(repo: dict[str, Path], monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "huggingface_hub", None)  # import fails
-    with pytest.raises(CarlaPackError, match=r"carla-pack\[huggingface\]"):
+    with pytest.raises(CarlaPackError, match=r"carla-pack-registry\[huggingface\]"):
         publish(repo["manifest"], repo["tarball"])
     assert "[[pack]]" not in repo["manifest"].read_text()

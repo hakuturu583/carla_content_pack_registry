@@ -15,6 +15,6 @@ revision = "main"                         # branch, tag or commit; each pack's s
 prefix = "packs/"
 
 # Publish a pack (uploads through huggingface_hub, then adds its entry here):
-#   pip install 'carla-pack[huggingface]'
+#   pip install 'carla-pack-registry[huggingface]'
 #   hf auth login                       # or HF_TOKEN: a token with write access to the repository
 #   carla-pack publish <Pack>.tar.gz
