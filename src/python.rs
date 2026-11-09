@@ -54,7 +54,7 @@ fn view(r: &Release) -> ReleaseView<'_> {
 }
 
 fn filter(base_release: Option<String>, platform: Option<String>, sha256: Option<String>) -> Filter {
-    Filter { base_release, platform, sha256 }
+    Filter { base_release, platform, sha256, ..Filter::default() }
 }
 
 #[pyclass(frozen)]
@@ -124,7 +124,11 @@ impl Client {
         to_object(py, &view(&r))
     }
 
-    #[pyo3(signature = (map_name, repos=None, base_release=None, platform=None, sha256=None))]
+    /// `format`: only releases indexed as carrying the map in that data format.
+    /// `assets`: also match maps a release names in its format index only (data a pack
+    /// carries in its asset file without a CARLA level).
+    #[pyo3(signature = (map_name, repos=None, base_release=None, platform=None, sha256=None, format=None, assets=false))]
+    #[allow(clippy::too_many_arguments)] // mirrors the Python keyword arguments
     fn find_map<'py>(
         &self,
         py: Python<'py>,
@@ -133,8 +137,10 @@ impl Client {
         base_release: Option<String>,
         platform: Option<String>,
         sha256: Option<String>,
+        format: Option<String>,
+        assets: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let f = filter(base_release, platform, sha256);
+        let f = Filter { format, assets, ..filter(base_release, platform, sha256) };
         let r = py.detach(|| self.inner.find_map(map_name, repos.as_deref(), &f)).map_err(to_py)?;
         to_object(py, &view(&r))
     }
@@ -173,6 +179,71 @@ impl Client {
     fn credentials_status<'py>(&self, py: Python<'py>, repo: &str) -> PyResult<Bound<'py, PyAny>> {
         call(py, || self.inner.credentials_status(repo))
     }
+
+    /// Fetches, verifies and unpacks the release in the cache (once), for its map data
+    /// rather than for a CARLA server, and returns the pack folder.
+    #[pyo3(signature = (release, base_release=None, platform=None, sha256=None))]
+    fn unpack(
+        &self,
+        py: Python<'_>,
+        release: &Bound<'_, PyAny>,
+        base_release: Option<String>,
+        platform: Option<String>,
+        sha256: Option<String>,
+    ) -> PyResult<PathBuf> {
+        let r = self.release(py, release, filter(base_release, platform, sha256))?;
+        py.detach(|| self.inner.unpack(&r)).map_err(to_py)
+    }
+
+    /// Every map's data formats in the release: `{map: {format: {type, path, files, origin}}}`.
+    #[pyo3(signature = (release, base_release=None, platform=None, sha256=None))]
+    fn formats<'py>(
+        &self,
+        py: Python<'py>,
+        release: &Bound<'py, PyAny>,
+        base_release: Option<String>,
+        platform: Option<String>,
+        sha256: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let r = self.release(py, release, filter(base_release, platform, sha256))?;
+        call(py, || self.inner.formats(&r))
+    }
+
+    /// The local path of `map` in `format` in the release, unpacked in the cache; with
+    /// `file`, one of a folder format's files by role (`lanelet2_map`, …).
+    #[pyo3(signature = (release, map_name, format, file=None, base_release=None, platform=None, sha256=None))]
+    #[allow(clippy::too_many_arguments)] // mirrors the Python keyword arguments
+    fn map_data(
+        &self,
+        py: Python<'_>,
+        release: &Bound<'_, PyAny>,
+        map_name: &str,
+        format: &str,
+        file: Option<String>,
+        base_release: Option<String>,
+        platform: Option<String>,
+        sha256: Option<String>,
+    ) -> PyResult<PathBuf> {
+        let r = self.release(py, release, filter(base_release, platform, sha256))?;
+        py.detach(|| self.inner.map_data(&r, map_name, format, file.as_deref())).map_err(to_py)
+    }
+}
+
+/// Every map's data formats in a pack folder (an installed pack, or one unpacked by
+/// `Client.unpack`) or a pack tarball: `{map: {format: {type, path, files, origin}}}`,
+/// paths relative to the pack folder.
+#[pyfunction]
+fn map_formats<'py>(py: Python<'py>, pack: PathBuf) -> PyResult<Bound<'py, PyAny>> {
+    call(py, || if pack.is_dir() { crate::formats::of_dir(&pack) } else { crate::formats::of_tarball(&pack) })
+}
+
+/// The local path of `map` in `format` in the pack folder `pack`; with `file`, one of a
+/// folder format's files by role.
+#[pyfunction]
+#[pyo3(signature = (pack, map_name, format, file=None))]
+fn map_data(pack: PathBuf, map_name: &str, format: &str, file: Option<String>) -> PyResult<PathBuf> {
+    let formats = crate::formats::of_dir(&pack).map_err(to_py)?;
+    crate::formats::resolve(&pack, &formats, map_name, format, file.as_deref()).map_err(to_py)
 }
 
 /// Appends the pack `tarball` to the manifest at `manifest` and (with `upload`) uploads it with
@@ -292,5 +363,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(saved_repos, m)?)?;
     m.add_function(wrap_pyfunction!(add_repo, m)?)?;
     m.add_function(wrap_pyfunction!(remove_repo, m)?)?;
+    m.add_function(wrap_pyfunction!(map_formats, m)?)?;
+    m.add_function(wrap_pyfunction!(map_data, m)?)?;
     Ok(())
 }

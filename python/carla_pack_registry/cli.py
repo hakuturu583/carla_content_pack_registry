@@ -177,9 +177,10 @@ def cmd_ls(args: argparse.Namespace) -> int:
                     _size(r["size"]),
                     ", ".join(r["maps"]) + (" (yanked)" if r.get("yanked") else ""),
                 ]
+                + ([_format_names(r)] if args.formats else [])
                 for r in releases
             ],
-            ["PACK", "BASE RELEASE", "PLATFORM", "SIZE", "MAPS"],
+            ["PACK", "BASE RELEASE", "PLATFORM", "SIZE", "MAPS"] + (["FORMATS"] if args.formats else []),
             "(no packs)",
         )
         for e in errors:
@@ -190,8 +191,66 @@ def cmd_ls(args: argparse.Namespace) -> int:
 
 
 def cmd_find(args: argparse.Namespace) -> int:
-    r = _client(args).find_map(args.map_name, **_filters(args))
+    r = _client(args).find_map(args.map_name, **_filters(args), format=args.format, assets=args.assets)
     _out(args, r, lambda: print(f"{r['ref']}  ({r['base_release']}, {r['platform']}, {_size(r['size'])})"))
+    return 0
+
+
+def _format_names(release: dict[str, Any]) -> str:
+    names = sorted({f for formats in release.get("formats", {}).values() for f in formats})
+    return ", ".join(names) or "-"
+
+
+def _local_pack(target: str) -> Path | None:
+    """`target` as a pack on disk: a pack folder or a pack tarball."""
+    path = Path(target)
+    if path.is_dir() and (path / "carla-pack.json").is_file():
+        return path
+    if path.is_file() and target.endswith((".tar.gz", ".tgz")):
+        return path
+    return None
+
+
+def _pack_formats(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
+    """The target's formats, and the pack folder or release they are in."""
+    local = _local_pack(args.target)
+    if local is not None:
+        return _core.map_formats(local), local
+    client = _client(args)
+    release = _release(client, args)
+    return client.formats(release), release
+
+
+def cmd_formats(args: argparse.Namespace) -> int:
+    formats, _ = _pack_formats(args)
+    rows = [
+        [name, kind, entry["type"], entry["origin"], entry["path"]]
+        for name, of_map in formats.items()
+        for kind, entry in of_map.items()
+        if args.map_name in (None, name)
+    ]
+    _out(args, formats, lambda: _table(rows, ["MAP", "FORMAT", "TYPE", "FROM", "PATH"], "(no map data)"))
+    return 0
+
+
+def cmd_data(args: argparse.Namespace) -> int:
+    local = _local_pack(args.target)
+    client = None if local is not None else _client(args)
+    release = None if client is None else _release(client, args)
+    map_name = args.map_name or (args.target if args.map else None)
+    if map_name is None:
+        formats = _core.map_formats(local) if local is not None else client.formats(release)
+        if len(formats) != 1:
+            raise CliError("the pack has maps %s: say which with --map-name" % (", ".join(formats) or "-"))
+        map_name = next(iter(formats))
+    if local is not None:
+        if local.is_file():
+            raise CliError("a tarball is not unpacked here: pass its pack folder, or a repository reference")
+        path = _core.map_data(local, map_name, args.format, args.file)
+    else:
+        path = client.map_data(release, map_name, args.format, args.file)
+    data = {"map": map_name, "format": args.format, "file": args.file, "path": str(path)}
+    _out(args, data, lambda: print(path))
     return 0
 
 
@@ -326,8 +385,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = add("ls", "list the packs of a repository (default: every listed repository)", cmd_ls)
     s.add_argument("repo", nargs="?", metavar="OWNER/REPO")
+    s.add_argument("--formats", action="store_true", help="also show the map data formats each release is indexed by")
     s = add("find", "which pack provides a CARLA map", cmd_find)
     s.add_argument("map_name")
+    selection(s, map_target=False)
+    s.add_argument("--format", help="only packs carrying the map in this data format (lanelet2, autoware, sumo, ...)")
+    s.add_argument(
+        "--assets", action="store_true",
+        help="also match maps a pack names in its asset file only (roadgen_asset.json), not as a CARLA level",
+    )
+    s = add("formats", "list a pack's map data by format (OpenDRIVE, and its asset file's)", cmd_formats)
+    s.add_argument("target", help="OWNER/REPO/PACK[@VERSION], a map name with --map, or a pack folder or tarball")
+    s.add_argument("--map", action="store_true", help="TARGET is a map name: use the newest pack providing it")
+    s.add_argument("--map-name", help="only this map of the pack")
+    selection(s, map_target=False)
+    s = add("data", "print the local path of a map in a data format (the pack is fetched and unpacked in the cache)", cmd_data)
+    s.add_argument("target", help="OWNER/REPO/PACK[@VERSION], a map name with --map, or a pack folder")
+    s.add_argument("--map", action="store_true", help="TARGET is a map name: use the newest pack providing it")
+    s.add_argument("--format", required=True, help="opendrive, lanelet2, autoware, pointcloud, sumo, commonroad, ...")
+    s.add_argument("--map-name", help="the pack's map (default: the target with --map, or the pack's only map)")
+    s.add_argument("--file", help="one file of a folder format, by role (e.g. autoware's pointcloud_map)")
     selection(s, map_target=False)
     s = add("pull", "download a pack tarball (SHA-256 verified)", cmd_pull)
     selection(s)

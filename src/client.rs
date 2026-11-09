@@ -206,7 +206,9 @@ impl Client {
                 Err(e) => return Err(e),
             };
             for p in m.packs {
-                if filter.matches(&p) && p.maps.iter().any(|x| short(x) == wanted) {
+                let named = p.maps.iter().any(|x| short(x) == wanted)
+                    || (filter.assets && p.formats.keys().any(|x| short(x) == wanted));
+                if named && filter.matches_map(&p, &wanted) {
                     candidates.push(Release { repo: repo.clone(), pack: p });
                 }
             }
@@ -339,6 +341,28 @@ impl Client {
         }
     }
 
+    /// `release` fetched, verified and unpacked in the cache (once), for its map data
+    /// rather than for a CARLA server: `<cache>/packs/<sha256>/<name>`.
+    pub fn unpack(&self, release: &Release) -> Result<PathBuf> {
+        let dir = self.cache_dir.join("packs").join(&release.pack.sha256);
+        Ok(self.install(release, &dir, &InstallOptions::default())?.path)
+    }
+
+    /// Every map's data formats in `release`, read from its tarball (fetched once into
+    /// the cache): the standard ones its `carla-pack.json` names and those of its asset
+    /// file, if it has one.
+    pub fn formats(&self, release: &Release) -> Result<crate::formats::MapFormats> {
+        crate::formats::of_tarball(&self.fetch(release)?)
+    }
+
+    /// The local path of `map` in `format` in `release`, unpacked in the cache: the
+    /// format's file or folder, or with `file` one of a folder's files by role.
+    pub fn map_data(&self, release: &Release, map: &str, format: &str, file: Option<&str>) -> Result<PathBuf> {
+        let dir = self.unpack(release)?;
+        let formats = crate::formats::of_dir(&dir)?;
+        crate::formats::resolve(&dir, &formats, map, format, file)
+    }
+
     /// Fetches, verifies and installs `release` as `<packs_dir>/<name>`. An identical pack
     /// already installed is left alone without downloading anything.
     pub fn install(&self, release: &Release, packs_dir: &Path, opts: &InstallOptions) -> Result<InstalledPack> {
@@ -429,6 +453,7 @@ pub fn plan_publish(manifest_path: &Path, tarball: &Path, opts: &PublishOptions)
         size: fs::metadata(tarball)?.len(),
         description: opts.description.clone(),
         yanked: false,
+        formats: crate::formats::index(&crate::formats::of_tarball(tarball)?),
     };
     debug_assert!(is_sha256(&entry.sha256));
     check_new_entry(&manifest, &entry)?;

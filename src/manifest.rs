@@ -31,7 +31,7 @@
 //! maps = ["Town01_Opt"]
 //! ```
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -219,7 +219,7 @@ fn validate_endpoint(endpoint: &str) -> std::result::Result<(), String> {
 }
 
 fn validate_prefix(prefix: &str) -> std::result::Result<(), String> {
-    if !prefix.is_empty() && !(prefix.ends_with('/') && is_clean_relpath(&prefix[..prefix.len() - 1])) {
+    if !(prefix.is_empty() || prefix.ends_with('/') && is_clean_relpath(&prefix[..prefix.len() - 1])) {
         return Err(format!("storage.prefix {prefix:?} must be a relative path ending in /"));
     }
     Ok(())
@@ -268,6 +268,12 @@ pub struct PackEntry {
     /// Withdrawn: never selected unless pinned by SHA-256.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub yanked: bool,
+    /// Each map's data formats (`opendrive`, `lanelet2`, …), as the pack's
+    /// `carla-pack.json` and optional asset file name them; what `--format` searches.
+    /// Written by `publish`; a release published before has none, and is found by map
+    /// name only.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub formats: BTreeMap<String, Vec<String>>,
 }
 
 impl Manifest {
@@ -396,6 +402,12 @@ pub struct Filter {
     pub platform: Option<String>,
     /// Pins one exact artifact (a lock file); also selects yanked releases.
     pub sha256: Option<String>,
+    /// Only releases indexed as carrying this data format for some map (for the map
+    /// searched, in a map search).
+    pub format: Option<String>,
+    /// In a map search, also take the maps a release's format index names, which
+    /// includes maps a pack carries data for in its asset file and not as a CARLA level.
+    pub assets: bool,
 }
 
 impl Filter {
@@ -406,6 +418,12 @@ impl Filter {
                 Some(s) => s.eq_ignore_ascii_case(&p.sha256),
                 None => !p.yanked,
             }
+            && self.format.as_ref().is_none_or(|f| p.formats.values().any(|fs| fs.contains(f)))
+    }
+
+    /// [`Filter::matches`], with the format, if any, carried for `map` in particular.
+    pub fn matches_map(&self, p: &PackEntry, map: &str) -> bool {
+        self.matches(p) && self.format.as_ref().is_none_or(|f| p.formats.get(map).is_some_and(|fs| fs.contains(f)))
     }
 }
 

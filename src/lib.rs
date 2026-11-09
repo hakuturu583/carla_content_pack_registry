@@ -11,6 +11,7 @@
 pub mod auth;
 pub mod client;
 pub mod error;
+pub mod formats;
 pub mod github;
 pub mod hf;
 pub mod manifest;

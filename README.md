@@ -71,6 +71,37 @@ c.install(release, packs_dir)                    # 検証して <packs_dir>/<nam
   数 GB の Pack は、キャッシュの tarball と展開後の Pack で **サイズの約 2 倍** のディスクを使います。
 - 接続が途中で切れても、受け取った位置から Range で再開します（最大 5 回）。再開しても全体の SHA-256 で検証します。
 
+### 地図データを形式で引く
+
+Pack が持つ地図データを、マップ名と形式名でローカルのパスとして取り出せます。CARLA サーバは要りません（Pack はキャッシュに取得・検証・展開されます）。
+
+- どの Pack でも、`carla-pack.json` にある標準の形式（`opendrive` / `navmesh` / `traffic_manager` / `map_logic`）。
+- Pack が `Content/Config/roadgen_asset.json`（任意）を持っていれば、その形式も（roadgen の `carla_pack_assets` が書く: `lanelet2` / `autoware`（Lanelet2・点群地図・projector）/ `pointcloud` / `sumo` / `commonroad` / `clipgt` / `rdshq` / `gpudrive` / `womd` など）。
+
+```bash
+carla-pack formats hakuturu583/carla-packs-test/RoadgenHighwayPack           # マップ × 形式の一覧
+carla-pack data hakuturu583/carla-packs-test/RoadgenHighwayPack --format lanelet2
+carla-pack data RoadgenHighway --map --format autoware --file pointcloud_map  # フォルダの中の 1 ファイル
+carla-pack find RoadgenHighway --format lanelet2      # その形式を持つ Pack（公開時の索引で探す）
+carla-pack find SomeDataOnlyMap --assets              # asset ファイルにだけあるマップも探す
+carla-pack ls --formats                               # 一覧に形式の列を出す
+carla-pack formats ./Packs/RoadgenHighwayPack         # インストール済みの Pack フォルダや tarball も可
+```
+
+```python
+from carla_pack_registry import Client, map_data, map_formats
+
+client = Client()
+release = client.find_map("RoadgenHighway", format="autoware")
+autoware_dir = client.map_data(release, "RoadgenHighway", "autoware")   # Autoware の map_path にそのまま
+pcd = client.map_data(release, "RoadgenHighway", "autoware", file="pointcloud_map")
+client.formats(release)          # {map: {format: {type, path, files, origin}}}
+map_formats("/opt/carla/CarlaUnreal/Packs/RoadgenHighwayPack")          # インストール済みの Pack
+map_data("/opt/carla/CarlaUnreal/Packs/RoadgenHighwayPack", "RoadgenHighway", "opendrive")
+```
+
+`carla-pack publish` は、マップごとの形式を `carla-packs.toml` のエントリ（`formats`）に書きます。`find --format` はこの索引で探すので、ダウンロードしません。
+
 ### 設定
 
 | 項目 | 方法 |

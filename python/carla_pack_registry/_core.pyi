@@ -31,7 +31,33 @@ class Client:
         base_release: str | None = None,
         platform: str | None = None,
         sha256: str | None = None,
+        format: str | None = None,
+        assets: bool = False,
     ) -> dict[str, Any]: ...
+    def unpack(
+        self,
+        release: str | dict[str, Any],
+        base_release: str | None = None,
+        platform: str | None = None,
+        sha256: str | None = None,
+    ) -> Path: ...
+    def formats(
+        self,
+        release: str | dict[str, Any],
+        base_release: str | None = None,
+        platform: str | None = None,
+        sha256: str | None = None,
+    ) -> dict[str, dict[str, dict[str, Any]]]: ...
+    def map_data(
+        self,
+        release: str | dict[str, Any],
+        map_name: str,
+        format: str,
+        file: str | None = None,
+        base_release: str | None = None,
+        platform: str | None = None,
+        sha256: str | None = None,
+    ) -> Path: ...
     def fetch(
         self,
         release: str | dict[str, Any],
@@ -72,3 +98,5 @@ def remove_login() -> bool: ...
 def saved_repos() -> list[str]: ...
 def add_repo(repo: str) -> bool: ...
 def remove_repo(repo: str) -> bool: ...
+def map_formats(pack: str | PathLike[str]) -> dict[str, dict[str, dict[str, Any]]]: ...
+def map_data(pack: str | PathLike[str], map_name: str, format: str, file: str | None = None) -> Path: ...

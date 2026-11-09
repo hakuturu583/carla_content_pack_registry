@@ -67,6 +67,9 @@ size = 3221225472
 maps = ["NishishinjukuMap"]
 description = "…"                     # 任意
 yanked = false                        # 任意。true にすると選ばれない（sha256 で固定した lock からは取得可）
+
+[pack.formats]                        # 任意。マップごとの地図データ形式（publish が書く。下の「地図データの形式」）
+NishishinjukuMap = ["autoware", "lanelet2", "navmesh", "opendrive", "sumo"]
 ```
 
 - 未知のキーはエラーにします（タイプミスの見逃し防止）。
@@ -74,6 +77,37 @@ yanked = false                        # 任意。true にすると選ばれな�
 - 選択: 条件（名前・バージョン・base release・platform・sha256）に合うもののうち最新版。最新版が複数の base release / platform にあれば曖昧としてエラー。
   バージョンは区切り（`.` `-` `+` `_`）ごとに数値比較し、`1.0.0` は `1.0.0-rc1` より新しいとみなします。
 - マップ名は `/Game/.../Town01` のようなパスでも末尾の名前で照合します。
+- `formats` はマップ名 → 形式名の一覧です。`find --format` はこの索引で探し、`find --assets` はここにだけ現れるマップ名（CARLA のレベルを持たないデータだけのマップ）も対象にします。
+  `formats` を書かずに公開した過去のリリースは、形式では見つからず、マップ名でだけ見つかります（取得後の `carla-pack formats` は過去のリリースでも使えます）。
+  `formats` を含むマニフェストは、このキーを知らない古い carla-pack（`formats` 追加前）では読めません。
+
+### 地図データの形式
+
+Pack が持つ地図データを、マップ名と形式名で引けます。CARLA サーバは要りません。
+
+- **標準の形式**: どの Pack でも、`carla-pack.json` の各マップの `xodr` / `nav` / `tm` / `map_logic` から作ります。形式名は `opendrive` / `navmesh` / `traffic_manager`（フォルダ）/ `map_logic`。
+- **asset ファイル（任意）**: Pack が `Content/Config/roadgen_asset.json` を持っていれば、その形式も加えます。roadgen の `carla_pack_assets` が書くファイルで、Lanelet2 と点群地図（Autoware）、SUMO、CommonRoad、ClipGT、RDS-HQ、GPUDrive、WOMD などを `Content/HDMaps/<map>/` に入れたことを示します。持たない Pack は標準の形式だけです。同じ形式名は標準の方を使います。
+
+```json
+{
+  "schema": 1,
+  "generator": {"name": "roadgen", "version": "0.43.0"},
+  "maps": {
+    "Highway": {
+      "formats": {
+        "lanelet2": {"type": "file", "path": "Content/HDMaps/Highway/autoware/lanelet2_map.osm"},
+        "autoware": {"type": "directory", "path": "Content/HDMaps/Highway/autoware",
+                     "files": {"lanelet2_map": "…/lanelet2_map.osm", "pointcloud_map": "…/pointcloud_map.pcd",
+                               "map_projector_info": "…/map_projector_info.yaml"}}
+      }
+    }
+  }
+}
+```
+
+- パスはすべて Pack フォルダ（`carla-pack.json` のあるフォルダ）からの正規化された相対パスで、外に出るパスはエラーです。
+- ビルド済みの Pack では、asset ファイルが指すファイルはすべて `carla-pack.json` の `files` に載っていなければなりません（インストール時の SHA-256 照合の対象であることの確認）。載っていなければ asset ファイルごと拒否します。
+- `schema` が 1 以外ならエラーです。
 
 ### `credentials.json`（Release asset）
 
@@ -99,8 +133,9 @@ yanked = false                        # 任意。true にすると選ばれな�
 | `src/sigv4.rs` | AWS Signature V4（ヘッダ署名、`UNSIGNED-PAYLOAD`）。AWS の公式テストベクタで検証 |
 | `src/hf.rs` | Hugging Face の公開リポジトリからの取得（匿名の `resolve` URL、Range で再開） |
 | `src/s3.rs` | GET（Range で再開）/ HEAD / PUT、64 MiB 超はマルチパートアップロード（失敗時は abort）。path / virtual-host 形式 |
-| `src/client.rs` | `resolve` / `find_map` / `fetch`（キャッシュと検証）/ `install` / `publish` |
+| `src/client.rs` | `resolve` / `find_map` / `fetch`（キャッシュと検証）/ `install` / `unpack` / `formats` / `map_data` / `publish` |
 | `src/pack.rs` | tarball の安全な展開、`carla-pack.json` による全ファイル照合、配置 |
+| `src/formats.rs` | 地図データの形式: `carla-pack.json` の標準の形式と `roadgen_asset.json` の形式の読み取り、索引、パスの解決 |
 | `src/store.rs` | トークンの探索、保存済み設定（ログイン、検索対象リポジトリ）、キャッシュの場所 |
 | `src/auth.rs` | GitHub デバイスフロー（client ID のみ、client secret 不要） |
 | `src/python.rs` | PyO3 バインディング（`carla_pack_registry._core`） |
