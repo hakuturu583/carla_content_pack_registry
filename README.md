@@ -24,7 +24,7 @@ carla-pack ──(1) GitHub API: carla-packs.toml を読む ──────�
 ## 使う（Pack をダウンロードする側）
 
 ```bash
-pip install carla-pack            # 公開後。開発中は「開発」を参照
+pip install carla-pack-registry   # 開発中は「開発」を参照
 
 gh auth login                     # GitHub CLI のトークンをそのまま使います（GH_TOKEN / GITHUB_TOKEN / carla-pack login でも可）
 carla-pack whoami
@@ -37,6 +37,9 @@ carla-pack install NishishinjukuMap --map \
 carla-pack install tier4/carla-packs/NishishinjukuPack@1.2.0 --packs-dir ./Packs   # 参照で指定
 carla-pack pull tier4/carla-packs/NishishinjukuPack -o ./downloads               # tarball だけ取得
 ```
+
+PyPI の配布名は `carla-pack-registry`、Python のモジュール名は `carla_pack_registry`、コマンド名は `carla-pack` です
+（CARLA 本体の `Util/ContentPacks/carla_pack.py` と同じ環境に入れても衝突しません）。
 
 Pack の指定は `OWNER/REPO/PACK[@VERSION]` です。バージョンを省略すると最新（`--base-release` / `--platform` で絞り込み）、
 `--sha256` を付けるとその成果物に固定します（lock ファイル用）。
@@ -123,7 +126,7 @@ CI では Pack リポジトリを読める fine-grained PAT か GitHub App の�
 1. Private リポジトリを作り、[templates/pack-repo/carla-packs.toml](templates/pack-repo/carla-packs.toml) を置く。配りたい相手に Read 権限を付ける。
 2. バケット（R2 / S3）と読み取り専用の鍵の発行元を用意し、[鍵のローテーション workflow](templates/pack-repo/.github/workflows/) をコピーする。
 3. `carla-pack publish <Pack>.tar.gz` でアップロードとマニフェストへの追記を行い、commit / push する。
-   アップロード先は R2 / S3（carla-pack が直接マルチパートで送る）か Hugging Face（`pip install 'carla-pack[huggingface]'`、`huggingface_hub` 経由）。
+   アップロード先は R2 / S3（carla-pack が直接マルチパートで送る）か Hugging Face（`pip install 'carla-pack-registry[huggingface]'`、`huggingface_hub` 経由）。
 
 ## 開発
 
@@ -137,6 +140,9 @@ pytest                     # Python: CARLA 側（mount / unmount の順序）と
 maturin build --release    # wheel（abi3: Python 3.10 以上で共通）
 ```
 
+PyPI へのリリースは PR のラベルで行います。`release:major|minor|patch` を 1 つ付けてマージすると、バージョンの更新・タグ・GitHub Release・PyPI 公開まで
+`.github/workflows/release.yml` が行います（[docs/release.md](docs/release.md)）。
+
 ## ドキュメント
 
 | ドキュメント | 内容 |
@@ -144,6 +150,7 @@ maturin build --release    # wheel（abi3: Python 3.10 以上で共通）
 | [docs/architecture.md](docs/architecture.md) | 仕組み、マニフェストと鍵ファイルの形式、旧 Registry サーバとの違い |
 | [docs/security.md](docs/security.md) | 信頼の境界、失効、残留リスク |
 | [docs/pack-repository.md](docs/pack-repository.md) | Pack リポジトリの作り方（R2 / AWS / その他の S3 互換） |
+| [docs/release.md](docs/release.md) | `carla-pack-registry` の PyPI リリース手順（ラベル駆動、Trusted Publishing） |
 
 ## ライセンス
 

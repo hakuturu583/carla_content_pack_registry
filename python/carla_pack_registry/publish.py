@@ -2,7 +2,7 @@
 
 S3-compatible buckets are uploaded to by the Rust core (multipart, signed). The Hugging
 Face Hub is uploaded to through huggingface_hub, its own client (its large-file transfer
-protocol is not something to reimplement): ``pip install 'carla-pack[huggingface]'``,
+protocol is not something to reimplement): ``pip install 'carla-pack-registry[huggingface]'``,
 and a write token from ``HF_TOKEN`` or ``hf auth login``.
 """
 
@@ -58,7 +58,7 @@ def _upload_to_hugging_face(
         from huggingface_hub import HfApi
     except ImportError:
         raise CarlaPackError(
-            "uploading to Hugging Face needs huggingface_hub: pip install 'carla-pack[huggingface]' "
+            "uploading to Hugging Face needs huggingface_hub: pip install 'carla-pack-registry[huggingface]' "
             "(or upload yourself and publish with --no-upload)",
             "usage",
         ) from None

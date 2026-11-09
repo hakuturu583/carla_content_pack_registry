@@ -3,7 +3,7 @@ requires = ["maturin>=1.9,<2"]
 build-backend = "maturin"
 
 [project]
-name = "carla-pack"
+name = "carla-pack-registry"
 description = "Share CARLA content packs through GitHub repository access and S3-compatible storage (R2, S3, MinIO)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,6 +15,12 @@ classifiers = [
   "Programming Language :: Rust",
   "Environment :: Console",
 ]
+keywords = ["carla", "content-pack", "simulator", "huggingface", "s3"]
+
+[project.urls]
+Homepage = "https://github.com/hakuturu583/carla_content_pack_registry"
+Repository = "https://github.com/hakuturu583/carla_content_pack_registry"
+Issues = "https://github.com/hakuturu583/carla_content_pack_registry/issues"
 
 [project.optional-dependencies]
 # Uploading packs to the Hugging Face Hub (downloads need nothing extra).
